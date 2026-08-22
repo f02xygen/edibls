@@ -1,0 +1,26 @@
+/target
+# Environment & Secrets
+.env
+*.env
+
+# Temporary downloaded media & covers
+*.mp3
+*.mp4
+*.m4a
+*.webm
+*.jpg
+*.jpeg
+*.png
+*.webp
+
+# IDEs, Editors & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

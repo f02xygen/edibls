@@ -1,5 +1,4 @@
 use std::env;
-use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::InputFile;
 use tempfile::TempDir;
@@ -19,8 +18,22 @@ async fn handle_update(
     yandex_token: Option<String>,
     queue: QueueManager,
 ) -> ResponseResult<()> {
+    let user_id = match msg.from() {
+        Some(user) => user.id,
+        None => return Ok(()),
+    };
+
     if let Some(text) = msg.text() {
         if let Some(url) = extract_url(text) {
+            if !queue.try_lock_user(user_id).await {
+                bot.send_message(
+                    msg.chat.id,
+                    "⚠️ У тебя уже скачивается один файл! Дождись его завершения.",
+                )
+                .await?;
+                return Ok(());
+            }
+
             let (service, pos) = queue.register(url);
 
             let status_msg = if pos > 1 {
@@ -39,7 +52,7 @@ async fn handle_update(
             };
 
             // Lock domain & wait for global slot
-            let _guard = queue.acquire(service).await;
+            let _guard = queue.acquire(service, user_id).await;
 
             let _ = bot
                 .edit_message_text(msg.chat.id, status_msg.id, "⏳ Начинаю скачивание...")

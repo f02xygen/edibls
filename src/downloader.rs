@@ -8,12 +8,34 @@ pub async fn download_media(url: &str, audio_only: bool) -> Result<PathBuf, Stri
     let output_template = "/tmp/edibls_%(id)s.%(ext)s";
     let mut cmd = Command::new("yt-dlp");
 
+    // Base limits & JS runtimes setup
+    cmd.args([
+        "--max-filesize",
+        "50M",
+        "--match-filter",
+        "duration <= 1200", // Max 20 minutes
+        "--js-runtimes",
+        "deno,node",
+        "--no-playlist",
+    ]);
+
+    // YouTube anti-bot & player client bypass
+    cmd.args([
+        "--extractor-args",
+        "youtube:player_client=android,ios,web",
+        "--extractor-args",
+        "youtube:po_token=web+http://127.0.0.1:4444/get_pot",
+    ]);
+
     if audio_only {
         // Extract audio stream and convert to mp3
-        cmd.arg("-x").arg("--audio-format").arg("mp3");
+        cmd.args(["-x", "--audio-format", "mp3"]);
     } else {
-        // Force standard format selection for video
-        cmd.arg("-f").arg("b[ext=mp4]/best[ext=mp4]/best");
+        // Select optimal format under Telegram's 50MB limit
+        cmd.args([
+            "-f",
+            "b[filesize<=50M]/bestvideo[filesize<=50M]+bestaudio/best[filesize<=50M]/best",
+        ]);
     }
 
     // Attach cookies if present in the working directory
@@ -23,7 +45,6 @@ pub async fn download_media(url: &str, audio_only: bool) -> Result<PathBuf, Stri
     }
 
     let output = cmd
-        .arg("--no-playlist")
         .arg("-o")
         .arg(output_template)
         .arg("--print")
@@ -47,6 +68,13 @@ pub async fn download_media(url: &str, audio_only: bool) -> Result<PathBuf, Stri
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         log::error!("yt-dlp execution failed: {}", stderr);
-        Err("Failed to download media from the provided URL".to_string())
+
+        if stderr.contains("does not pass filter duration") {
+            Err("Видео слишком длинное (максимум 20 минут)".to_string())
+        } else if stderr.contains("File is larger than max-filesize") {
+            Err("Размер файла превышает лимит Telegram в 50 МБ".to_string())
+        } else {
+            Err("Не удалось скачать медиафайл по указанной ссылке".to_string())
+        }
     }
 }

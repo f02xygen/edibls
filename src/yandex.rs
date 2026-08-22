@@ -4,9 +4,7 @@ use tokio::process::Command;
 
 /// Checks if the URL belongs to Yandex Music service
 pub fn is_yandex_music_url(url: &str) -> bool {
-    url.contains("music.yandex.ru")
-        || url.contains("music.yandex.by")
-        || url.contains("music.yandex.kz")
+    url.contains("music.yandex.") || url.contains("yandex.ru/music")
 }
 
 /// Downloads track/album/playlist from Yandex Music into the destination directory

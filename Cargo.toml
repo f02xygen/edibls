@@ -1,0 +1,15 @@
+[package]
+name = "edibls"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+teloxide = { version = "0.17", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+pretty_env_logger = "0.5"
+log = "0.4"
+tempfile = "3"
+anyhow = "1.0"
+dotenvy = "0.15"
+lofty = "0.21"
+image = "0.25"

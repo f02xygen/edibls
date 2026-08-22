@@ -1,7 +1,8 @@
 use crate::yandex::is_yandex_music_url;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use teloxide::types::UserId;
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -49,9 +50,23 @@ impl Service {
     }
 }
 
+pub struct UserGuard {
+    user_id: UserId,
+    active_users: Arc<Mutex<HashSet<UserId>>>,
+}
+
+impl Drop for UserGuard {
+    fn drop(&mut self) {
+        if let Ok(mut set) = self.active_users.try_lock() {
+            set.remove(&self.user_id);
+        }
+    }
+}
+
 pub struct ServiceGuard {
     _domain_guard: OwnedMutexGuard<()>,
     _global_guard: OwnedSemaphorePermit,
+    _user_guard: UserGuard,
     waiters: Arc<AtomicUsize>,
 }
 
@@ -66,6 +81,7 @@ pub struct QueueManager {
     global_semaphore: Arc<Semaphore>,
     domain_locks: Arc<HashMap<Service, Arc<Mutex<()>>>>,
     domain_waiters: Arc<HashMap<Service, Arc<AtomicUsize>>>,
+    active_users: Arc<Mutex<HashSet<UserId>>>,
 }
 
 impl QueueManager {
@@ -82,33 +98,32 @@ impl QueueManager {
             global_semaphore: Arc::new(Semaphore::new(max_global)),
             domain_locks: Arc::new(locks),
             domain_waiters: Arc::new(waiters),
+            active_users: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
-    /// Increments queue position counter and returns (Service, Position)
+    /// Tries to lock the user for a single active task. Returns false if user already has an active download.
+    pub async fn try_lock_user(&self, user_id: UserId) -> bool {
+        let mut users = self.active_users.lock().await;
+        users.insert(user_id)
+    }
+
+    pub fn unlock_user(&self, user_id: UserId) {
+        if let Ok(mut users) = self.active_users.try_lock() {
+            users.remove(&user_id);
+        }
+    }
+
     pub fn register(&self, url: &str) -> (Service, usize) {
         let service = Service::from_url(url);
-        let waiters = self
-            .domain_waiters
-            .get(&service)
-            .expect("All service variants must be registered in QueueManager");
+        let waiters = self.domain_waiters.get(&service).unwrap();
         let pos = waiters.fetch_add(1, Ordering::SeqCst) + 1;
         (service, pos)
     }
 
-    /// Waits for the domain-specific lock and global execution slot
-    pub async fn acquire(&self, service: Service) -> ServiceGuard {
-        let lock_arc = self
-            .domain_locks
-            .get(&service)
-            .expect("All service variants must be registered in QueueManager")
-            .clone();
-
-        let waiters_arc = self
-            .domain_waiters
-            .get(&service)
-            .expect("All service variants must be registered in QueueManager")
-            .clone();
+    pub async fn acquire(&self, service: Service, user_id: UserId) -> ServiceGuard {
+        let lock_arc = self.domain_locks.get(&service).unwrap().clone();
+        let waiters_arc = self.domain_waiters.get(&service).unwrap().clone();
 
         let domain_guard = lock_arc.lock_owned().await;
         let global_guard = self.global_semaphore.clone().acquire_owned().await.unwrap();
@@ -116,6 +131,10 @@ impl QueueManager {
         ServiceGuard {
             _domain_guard: domain_guard,
             _global_guard: global_guard,
+            _user_guard: UserGuard {
+                user_id,
+                active_users: self.active_users.clone(),
+            },
             waiters: waiters_arc,
         }
     }

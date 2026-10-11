@@ -9,6 +9,10 @@ pub struct Config {
     pub cookies_path: Option<PathBuf>,
     pub youtube_pot_url: Option<String>,
     pub yandex_downloader_bin: PathBuf,
+    pub telegram_api_url: Option<String>,
+    pub max_filesize_mb: u64,
+    pub max_duration_secs: u64,
+    pub settings_path: PathBuf,
 }
 
 impl Config {
@@ -44,6 +48,24 @@ impl Config {
             PathBuf::from("yandex-music-downloader")
         };
 
+        let telegram_api_url = env::var("TELEGRAM_API_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+
+        let max_filesize_mb = env::var("MAX_FILESIZE_MB")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(if telegram_api_url.is_some() { 2000 } else { 50 });
+
+        let max_duration_secs = env::var("MAX_DURATION_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(if telegram_api_url.is_some() { 7200 } else { 1200 });
+
+        let settings_path = env::var("SETTINGS_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("settings.json"));
+
         Self {
             teloxide_token,
             yandex_music_token,
@@ -51,6 +73,10 @@ impl Config {
             cookies_path,
             youtube_pot_url,
             yandex_downloader_bin,
+            telegram_api_url,
+            max_filesize_mb,
+            max_duration_secs,
+            settings_path,
         }
     }
 }

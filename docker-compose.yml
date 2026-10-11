@@ -11,13 +11,16 @@ services:
     environment:
       - RUST_LOG=info
       - YOUTUBE_POT_URL=http://pot-provider:4416/get_pot
+      - TELEGRAM_API_URL=http://telegram-bot-api:8081
     tmpfs:
-      - /tmp:size=512M,mode=1777
+      - /tmp:size=4096M,mode=1777
     # Uncomment if you want to mount cookies.txt for yt-dlp:
     # volumes:
     #   - ./cookies.txt:/app/cookies.txt:ro
     depends_on:
       pot-provider:
+        condition: service_started
+      telegram-bot-api:
         condition: service_started
 
   pot-provider:
@@ -25,3 +28,18 @@ services:
     container_name: edibls-pot-provider
     restart: unless-stopped
     init: true
+
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    container_name: edibls-telegram-bot-api
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID:-}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH:-}
+      - TELEGRAM_LOCAL=true
+    volumes:
+      - telegram-bot-api-data:/var/lib/telegram-bot-api
+
+volumes:
+  telegram-bot-api-data:
+

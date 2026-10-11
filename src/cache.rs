@@ -28,8 +28,8 @@ pub struct MediaCache {
 
 #[derive(Default)]
 struct CacheState {
-    media: HashMap<(String, bool), CacheEntry>,
-    media_order: VecDeque<(String, bool)>,
+    media: HashMap<(String, bool, Option<u16>), CacheEntry>,
+    media_order: VecDeque<(String, bool, Option<u16>)>,
     total_bytes: u64,
     url_to_id: HashMap<String, u64>,
     id_to_url: HashMap<u64, String>,
@@ -44,20 +44,27 @@ impl MediaCache {
         }
     }
 
-    /// Retrieves cached Telegram `FileId`(s) for the given URL and mode (`audio_only`).
-    pub fn get(&self, url: &str, audio_only: bool) -> Option<CachedMedia> {
+    /// Retrieves cached Telegram `FileId`(s) for the given URL, mode (`audio_only`), and resolution (`max_height`).
+    pub fn get(&self, url: &str, audio_only: bool, max_height: Option<u16>) -> Option<CachedMedia> {
         let state = self.inner.lock().ok()?;
         state
             .media
-            .get(&(url.to_string(), audio_only))
+            .get(&(url.to_string(), audio_only, max_height))
             .map(|entry| entry.media.clone())
     }
 
-    /// Stores Telegram `FileId`(s) for the given URL and mode (`audio_only`),
+    /// Stores Telegram `FileId`(s) for the given URL, mode (`audio_only`), and resolution (`max_height`),
     /// evicting the earliest entries once the 5 GB or entry limit is reached.
-    pub fn insert(&self, url: &str, audio_only: bool, media: CachedMedia, size_bytes: u64) {
+    pub fn insert(
+        &self,
+        url: &str,
+        audio_only: bool,
+        max_height: Option<u16>,
+        media: CachedMedia,
+        size_bytes: u64,
+    ) {
         if let Ok(mut state) = self.inner.lock() {
-            let key = (url.to_string(), audio_only);
+            let key = (url.to_string(), audio_only, max_height);
 
             if let Some(old) = state.media.remove(&key) {
                 state.total_bytes = state.total_bytes.saturating_sub(old.size_bytes);

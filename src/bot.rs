@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{
@@ -8,8 +9,8 @@ use tempfile::TempDir;
 use crate::cache::{CachedMedia, MediaCache};
 use crate::config::Config;
 use crate::media::{
-    extract_ph_search_query, extract_search_query, extract_url, fetch_media, is_audio_request,
-    MediaOutput,
+    extract_ph_search_query, extract_search_query, extract_url, fetch_media, format_progress_bar,
+    is_audio_request, read_network_tx_bytes, MediaOutput,
 };
 use crate::providers::pornhub::{search_pornhub_videos, PornhubVideoInfo};
 use crate::providers::yandex::{search_yandex_tracks, YandexTrackInfo};
@@ -225,7 +226,7 @@ pub async fn process_and_send_media(
     let service_guard = queue.acquire(service, waiter_guard).await;
 
     let _ = bot
-        .edit_message_text(chat_id, status_msg.id, "Начинаю скачивание...")
+        .edit_message_text(chat_id, status_msg.id, format_progress_bar("📥 Скачивание", 0))
         .await;
 
     let temp_dir = match TempDir::new() {
@@ -241,19 +242,79 @@ pub async fn process_and_send_media(
         }
     };
 
-    let media_result = fetch_media(url, audio_only, max_height, temp_dir.path(), config).await;
+    let dl_progress = Arc::new(AtomicU8::new(0));
+    let dl_bot = bot.clone();
+    let dl_msg_id = status_msg.id;
+    let dl_prog_clone = Arc::clone(&dl_progress);
+    let dl_updater = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        interval.tick().await;
+        let mut last_pct = 0u8;
+        loop {
+            interval.tick().await;
+            let pct = dl_prog_clone.load(Ordering::Relaxed);
+            if pct != last_pct {
+                last_pct = pct;
+                let _ = dl_bot
+                    .edit_message_text(chat_id, dl_msg_id, format_progress_bar("📥 Скачивание", pct))
+                    .await;
+            }
+        }
+    });
+
+    let media_result = fetch_media(
+        url,
+        audio_only,
+        max_height,
+        temp_dir.path(),
+        config,
+        &dl_progress,
+    )
+    .await;
+
+    dl_updater.abort();
 
     // Release domain & global download slot immediately so next user can start downloading
     drop(service_guard);
 
     match media_result {
         Ok(MediaOutput::Audio(tracks)) => {
-            bot.edit_message_text(
-                chat_id,
-                status_msg.id,
-                format!("Отправляю {} аудио...", tracks.len()),
-            )
-            .await?;
+            let total_files_bytes: u64 = tracks
+                .iter()
+                .filter_map(|t| std::fs::metadata(&t.path).ok().map(|m| m.len()))
+                .sum();
+            let start_tx = read_network_tx_bytes();
+
+            let _ = bot
+                .edit_message_text(chat_id, status_msg.id, format_progress_bar("📤 Отправка", 0))
+                .await;
+
+            let ul_bot = bot.clone();
+            let ul_msg_id = status_msg.id;
+            let ul_updater = tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+                interval.tick().await;
+                let mut last_pct = 0u8;
+                loop {
+                    interval.tick().await;
+                    if total_files_bytes > 0 {
+                        let current_tx = read_network_tx_bytes();
+                        let sent = current_tx.saturating_sub(start_tx);
+                        let raw_pct = (sent as f64 / (total_files_bytes as f64 * 1.02)) * 100.0;
+                        let pct = raw_pct.round().clamp(0.0, 99.0) as u8;
+                        if pct != last_pct {
+                            last_pct = pct;
+                            let _ = ul_bot
+                                .edit_message_text(
+                                    chat_id,
+                                    ul_msg_id,
+                                    format_progress_bar("📤 Отправка", pct),
+                                )
+                                .await;
+                        }
+                    }
+                }
+            });
 
             let mut uploaded_ids = Vec::with_capacity(tracks.len());
             let mut total_size: u64 = 0;
@@ -288,6 +349,8 @@ pub async fn process_and_send_media(
                 }
             }
 
+            ul_updater.abort();
+
             if !uploaded_ids.is_empty() {
                 cache.insert(url, true, None, CachedMedia::Audio(uploaded_ids), total_size);
             }
@@ -295,8 +358,42 @@ pub async fn process_and_send_media(
             let _ = bot.delete_message(chat_id, status_msg.id).await;
         }
         Ok(MediaOutput::Video(file_path)) => {
-            bot.edit_message_text(chat_id, status_msg.id, "Отправляю видео...")
-                .await?;
+            let file_size = tokio::fs::metadata(&file_path)
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0);
+            let start_tx = read_network_tx_bytes();
+
+            let _ = bot
+                .edit_message_text(chat_id, status_msg.id, format_progress_bar("📤 Отправка", 0))
+                .await;
+
+            let ul_bot = bot.clone();
+            let ul_msg_id = status_msg.id;
+            let ul_updater = tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+                interval.tick().await;
+                let mut last_pct = 0u8;
+                loop {
+                    interval.tick().await;
+                    if file_size > 0 {
+                        let current_tx = read_network_tx_bytes();
+                        let sent = current_tx.saturating_sub(start_tx);
+                        let raw_pct = (sent as f64 / (file_size as f64 * 1.02)) * 100.0;
+                        let pct = raw_pct.round().clamp(0.0, 99.0) as u8;
+                        if pct != last_pct {
+                            last_pct = pct;
+                            let _ = ul_bot
+                                .edit_message_text(
+                                    chat_id,
+                                    ul_msg_id,
+                                    format_progress_bar("📤 Отправка", pct),
+                                )
+                                .await;
+                        }
+                    }
+                }
+            });
 
             let url_id = cache.register_url(url);
             let input_file = InputFile::file(&file_path);
@@ -309,7 +406,10 @@ pub async fn process_and_send_media(
                 request = request.reply_parameters(ReplyParameters::new(msg_id));
             }
 
-            match request.await {
+            let send_res = request.await;
+            ul_updater.abort();
+
+            match send_res {
                 Ok(sent_msg) => {
                     if let Some(video) = sent_msg.video() {
                         cache.insert(

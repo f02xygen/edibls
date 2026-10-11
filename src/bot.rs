@@ -154,6 +154,7 @@ pub async fn process_and_send_media(
             .await?;
 
             let mut uploaded_ids = Vec::with_capacity(tracks.len());
+            let mut total_size: u64 = 0;
 
             for track in tracks {
                 let input_file = InputFile::file(&track.path);
@@ -175,6 +176,7 @@ pub async fn process_and_send_media(
                 match request.await {
                     Ok(sent_msg) => {
                         if let Some(audio) = sent_msg.audio() {
+                            total_size = total_size.saturating_add(u64::from(audio.file.size));
                             uploaded_ids.push(audio.file.id.clone());
                         }
                     }
@@ -185,7 +187,7 @@ pub async fn process_and_send_media(
             }
 
             if !uploaded_ids.is_empty() {
-                cache.insert(url, true, CachedMedia::Audio(uploaded_ids));
+                cache.insert(url, true, CachedMedia::Audio(uploaded_ids), total_size);
             }
 
             let _ = bot.delete_message(chat_id, status_msg.id).await;
@@ -208,7 +210,12 @@ pub async fn process_and_send_media(
             match request.await {
                 Ok(sent_msg) => {
                     if let Some(video) = sent_msg.video() {
-                        cache.insert(url, false, CachedMedia::Video(video.file.id.clone()));
+                        cache.insert(
+                            url,
+                            false,
+                            CachedMedia::Video(video.file.id.clone()),
+                            u64::from(video.file.size),
+                        );
                     }
                 }
                 Err(e) => {

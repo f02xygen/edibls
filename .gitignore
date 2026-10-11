@@ -2,6 +2,11 @@
 # Environment & Secrets
 .env
 *.env
+cookies.txt
+
+# Virtual environments
+venv/
+.venv/
 
 # Temporary downloaded media & covers
 *.mp3

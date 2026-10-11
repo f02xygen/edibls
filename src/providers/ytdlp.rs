@@ -1,14 +1,22 @@
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
-/// Downloads media via yt-dlp (video or audio-only) and returns the file path.
-pub async fn download_media(url: &str, audio_only: bool) -> Result<PathBuf, String> {
+use crate::config::Config;
+
+/// Downloads media via yt-dlp (video or audio-only) into the provided temp directory.
+pub async fn download_media(
+    url: &str,
+    audio_only: bool,
+    temp_dir: &Path,
+    config: &Config,
+) -> Result<PathBuf, String> {
     log::info!("Processing URL (audio_only={}): {}", audio_only, url);
 
-    let output_template = "/tmp/edibls_%(id)s.%(ext)s";
+    let output_template = temp_dir.join("%(id)s.%(ext)s");
+    let output_template_str = output_template.to_string_lossy();
+
     let mut cmd = Command::new("yt-dlp");
 
-    // Base limits & JS runtimes setup
     cmd.args([
         "--max-filesize",
         "50M",
@@ -19,34 +27,31 @@ pub async fn download_media(url: &str, audio_only: bool) -> Result<PathBuf, Stri
         "--no-playlist",
     ]);
 
-    // YouTube anti-bot & player client bypass
-    cmd.args([
-        "--extractor-args",
-        "youtube:player_client=android,ios,web",
-        "--extractor-args",
-        "youtube:po_token=web+http://127.0.0.1:4444/get_pot",
-    ]);
+    // Build combined youtube extractor args so flags do not overwrite each other
+    let yt_extractor_args = if let Some(pot_url) = &config.youtube_pot_url {
+        format!("youtube:player_client=android,ios,web;po_token=web+{pot_url}")
+    } else {
+        "youtube:player_client=android,ios,web".to_string()
+    };
+    cmd.arg("--extractor-args").arg(yt_extractor_args);
 
     if audio_only {
-        // Extract audio stream and convert to mp3
         cmd.args(["-x", "--audio-format", "mp3"]);
     } else {
-        // Select optimal format under Telegram's 50MB limit
         cmd.args([
             "-f",
             "b[filesize<=50M]/bestvideo[filesize<=50M]+bestaudio/best[filesize<=50M]/best",
         ]);
     }
 
-    // Attach cookies if present in the working directory
-    if Path::new("cookies.txt").exists() {
-        log::info!("Found cookies.txt, attaching to yt-dlp execution");
-        cmd.arg("--cookies").arg("cookies.txt");
+    if let Some(cookies) = &config.cookies_path {
+        log::info!("Using cookies from: {:?}", cookies);
+        cmd.arg("--cookies").arg(cookies);
     }
 
     let output = cmd
         .arg("-o")
-        .arg(output_template)
+        .arg(&*output_template_str)
         .arg("--print")
         .arg("after_move:filepath")
         .arg(url)

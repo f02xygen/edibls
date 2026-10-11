@@ -1,0 +1,27 @@
+services:
+  edibls:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: edibls
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - RUST_LOG=info
+      - YOUTUBE_POT_URL=http://pot-provider:4444/get_pot
+    volumes:
+      # Optional: bind cookies.txt if present
+      - type: bind
+        source: ./cookies.txt
+        target: /app/cookies.txt
+        read_only: true
+    depends_on:
+      pot-provider:
+        condition: service_started
+
+  pot-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider:latest
+    container_name: edibls-pot-provider
+    restart: unless-stopped
+    init: true

@@ -23,7 +23,9 @@ pub async fn download_media(
         "--match-filter",
         "duration <= 1200", // Max 20 minutes
         "--js-runtimes",
-        "deno,node",
+        "deno",
+        "--js-runtimes",
+        "node",
         "--no-playlist",
     ]);
 

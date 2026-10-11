@@ -26,6 +26,35 @@ pub fn extract_url(text: &str) -> Option<&str> {
         .find(|word| word.starts_with("http://") || word.starts_with("https://"))
 }
 
+/// Extracts a Yandex Music track search query from the message text.
+/// Supports `/ym <query>`, `/audio <query>`, `/mp3 <query>`, `/search <query>` in any chat,
+/// as well as plain text (without links or slash commands) in private chats.
+pub fn extract_search_query(text: &str, is_private: bool) -> Option<&str> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || extract_url(trimmed).is_some() {
+        return None;
+    }
+
+    if let Some(first_word) = trimmed.split_whitespace().next() {
+        if first_word.starts_with('/') {
+            let cmd = first_word.split('@').next().unwrap_or(first_word);
+            if matches!(cmd, "/ym" | "/audio" | "/mp3" | "/search") {
+                let rest = trimmed[first_word.len()..].trim();
+                if !rest.is_empty() {
+                    return Some(rest);
+                }
+            }
+            return None;
+        }
+    }
+
+    if is_private {
+        Some(trimmed)
+    } else {
+        None
+    }
+}
+
 /// Determines whether the request should be processed as audio-only.
 pub fn is_audio_request(url: &str, text: &str) -> bool {
     is_yandex_music_url(url)
@@ -113,3 +142,24 @@ pub async fn fetch_media(
         Ok(MediaOutput::Video(file_path))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_search_query_private_vs_group() {
+        assert_eq!(extract_search_query("Кино Кукушка", true), Some("Кино Кукушка"));
+        assert_eq!(extract_search_query("Кино Кукушка", false), None);
+    }
+
+    #[test]
+    fn test_extract_search_query_commands() {
+        assert_eq!(extract_search_query("/ym Кукушка", false), Some("Кукушка"));
+        assert_eq!(extract_search_query("/ym@edibls_bot Кино - Кукушка", false), Some("Кино - Кукушка"));
+        assert_eq!(extract_search_query("/audio Кукушка", true), Some("Кукушка"));
+        assert_eq!(extract_search_query("/audio https://youtu.be/abc", true), None);
+        assert_eq!(extract_search_query("/ym", true), None);
+    }
+}
+

@@ -55,7 +55,7 @@ impl Config {
         let max_filesize_mb = env::var("MAX_FILESIZE_MB")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(if telegram_api_url.is_some() { 2000 } else { 50 });
+            .unwrap_or(if telegram_api_url.is_some() { 2000 } else { 49 });
 
         let max_duration_secs = env::var("MAX_DURATION_SECS")
             .ok()

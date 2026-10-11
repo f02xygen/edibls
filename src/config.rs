@@ -26,7 +26,7 @@ impl Config {
             .unwrap_or(3);
 
         let raw_cookies_path = env::var("COOKIES_PATH").unwrap_or_else(|_| "cookies.txt".to_string());
-        let cookies_path = if Path::new(&raw_cookies_path).exists() {
+        let cookies_path = if Path::new(&raw_cookies_path).is_file() {
             Some(PathBuf::from(raw_cookies_path))
         } else {
             None

@@ -26,6 +26,14 @@ pub fn extract_url(text: &str) -> Option<&str> {
         .find(|word| word.starts_with("http://") || word.starts_with("https://"))
 }
 
+/// Determines whether the request should be processed as audio-only.
+pub fn is_audio_request(url: &str, text: &str) -> bool {
+    is_yandex_music_url(url)
+        || text.starts_with("/audio")
+        || text.starts_with("/mp3")
+        || text.contains("audio")
+}
+
 /// Reads audio tags and resizes the cover image to fit Telegram API restrictions (max 320x320).
 pub fn process_audio_metadata(file_path: &Path) -> AudioTrack {
     let cover_path = file_path.with_extension("jpg");
@@ -78,7 +86,7 @@ async fn process_tracks_blocking(files: Vec<PathBuf>) -> Vec<AudioTrack> {
 /// High-level function to handle download and metadata parsing for any supported platform.
 pub async fn fetch_media(
     url: &str,
-    text: &str,
+    audio_only: bool,
     temp_dir: &Path,
     config: &Config,
 ) -> Result<MediaOutput, String> {
@@ -95,10 +103,6 @@ pub async fn fetch_media(
         let tracks = process_tracks_blocking(files).await;
         return Ok(MediaOutput::Audio(tracks));
     }
-
-    let audio_only = text.starts_with("/audio")
-        || text.starts_with("/mp3")
-        || text.contains("audio");
 
     let file_path = download_media(url, audio_only, temp_dir, config).await?;
 

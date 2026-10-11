@@ -2,12 +2,14 @@ use std::sync::Arc;
 use teloxide::prelude::*;
 
 mod bot;
+mod cache;
 mod config;
 mod media;
 mod providers;
 mod queue;
 
-use bot::handle_update;
+use bot::{handle_callback, handle_message};
+use cache::MediaCache;
 use config::Config;
 use queue::QueueManager;
 
@@ -40,20 +42,34 @@ async fn main() {
 
     let bot = Bot::new(&config.teloxide_token);
     let queue = QueueManager::new(config.max_concurrent_downloads);
+    let cache = MediaCache::new();
 
-    teloxide::repl(bot, move |bot: Bot, msg: Message| {
-        let config = Arc::clone(&config);
-        let queue = queue.clone();
+    let handler = dptree::entry()
+        .branch(Update::filter_message().endpoint(
+            move |bot: Bot, msg: Message, config: Arc<Config>, queue: QueueManager, cache: MediaCache| async move {
+                tokio::spawn(async move {
+                    if let Err(err) = handle_message(bot, msg, config, queue, cache).await {
+                        log::error!("Error handling message: {:?}", err);
+                    }
+                });
+                respond(())
+            },
+        ))
+        .branch(Update::filter_callback_query().endpoint(
+            move |bot: Bot, q: CallbackQuery, config: Arc<Config>, queue: QueueManager, cache: MediaCache| async move {
+                tokio::spawn(async move {
+                    if let Err(err) = handle_callback(bot, q, config, queue, cache).await {
+                        log::error!("Error handling callback query: {:?}", err);
+                    }
+                });
+                respond(())
+            },
+        ));
 
-        async move {
-            tokio::spawn(async move {
-                if let Err(err) = handle_update(bot, msg, config, queue).await {
-                    log::error!("Error handling update: {:?}", err);
-                }
-            });
-
-            Ok(())
-        }
-    })
-    .await;
+    Dispatcher::builder(bot, handler)
+        .dependencies(dptree::deps![config, queue, cache])
+        .enable_ctrlc_handler()
+        .build()
+        .dispatch()
+        .await;
 }

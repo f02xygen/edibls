@@ -11,6 +11,8 @@ services:
     environment:
       - RUST_LOG=info
       - YOUTUBE_POT_URL=http://pot-provider:4416/get_pot
+    tmpfs:
+      - /tmp:size=512M,mode=1777
     # Uncomment if you want to mount cookies.txt for yt-dlp:
     # volumes:
     #   - ./cookies.txt:/app/cookies.txt:ro

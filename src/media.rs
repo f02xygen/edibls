@@ -134,6 +134,40 @@ async fn process_tracks_blocking(files: Vec<PathBuf>) -> Vec<AudioTrack> {
     .unwrap_or_default()
 }
 
+/// Formats a compact 10-block visual progress bar message.
+pub fn format_progress_bar(stage_label: &str, percent: u8) -> String {
+    let clamped = percent.min(100);
+    let filled = (usize::from(clamped) + 5) / 10;
+    let empty = 10usize.saturating_sub(filled);
+    let bar: String = std::iter::repeat('█')
+        .take(filled)
+        .chain(std::iter::repeat('░').take(empty))
+        .collect();
+    format!("{stage_label}: {clamped}%\n[{bar}]")
+}
+
+/// Reads total transmitted bytes (`tx_bytes`) across non-loopback network interfaces from `/proc/net/dev`.
+pub fn read_network_tx_bytes() -> u64 {
+    let Ok(content) = std::fs::read_to_string("/proc/net/dev") else {
+        return 0;
+    };
+    let mut total_tx = 0u64;
+    for line in content.lines().skip(2) {
+        let Some((iface, stats)) = line.split_once(':') else {
+            continue;
+        };
+        if iface.trim() == "lo" {
+            continue;
+        }
+        if let Some(tx_str) = stats.split_whitespace().nth(8) {
+            if let Ok(tx) = tx_str.parse::<u64>() {
+                total_tx = total_tx.saturating_add(tx);
+            }
+        }
+    }
+    total_tx
+}
+
 /// High-level function to handle download and metadata parsing for any supported platform.
 pub async fn fetch_media(
     url: &str,
@@ -141,6 +175,7 @@ pub async fn fetch_media(
     max_height: Option<u16>,
     temp_dir: &Path,
     config: &Config,
+    progress: & std::sync::Arc<std::sync::atomic::AtomicU8>,
 ) -> Result<MediaOutput, String> {
     if is_yandex_music_url(url) {
         let token = config
@@ -152,11 +187,12 @@ pub async fn fetch_media(
             .await
             .map_err(|e| e.to_string())?;
 
+        progress.store(100, std::sync::atomic::Ordering::Relaxed);
         let tracks = process_tracks_blocking(files).await;
         return Ok(MediaOutput::Audio(tracks));
     }
 
-    let file_path = download_media(url, audio_only, max_height, temp_dir, config).await?;
+    let file_path = download_media(url, audio_only, max_height, temp_dir, config, progress).await?;
 
     if audio_only {
         let tracks = process_tracks_blocking(vec![file_path]).await;
@@ -202,6 +238,26 @@ mod tests {
         assert!(is_audio_request("https://music.yandex.ru/track/123", "https://music.yandex.ru/track/123", false));
         assert!(is_audio_request("https://pornhub.com/view_video.php?viewkey=123", "https://pornhub.com/view_video.php?viewkey=123", true));
         assert!(!is_audio_request("https://pornhub.com/view_video.php?viewkey=123", "https://pornhub.com/view_video.php?viewkey=123", false));
+    }
+
+    #[test]
+    fn test_format_progress_bar() {
+        assert_eq!(
+            format_progress_bar("📥 Скачивание", 0),
+            "📥 Скачивание: 0%\n[░░░░░░░░░░]"
+        );
+        assert_eq!(
+            format_progress_bar("📥 Скачивание", 50),
+            "📥 Скачивание: 50%\n[█████░░░░░]"
+        );
+        assert_eq!(
+            format_progress_bar("📤 Отправка", 36),
+            "📤 Отправка: 36%\n[████░░░░░░]"
+        );
+        assert_eq!(
+            format_progress_bar("📤 Отправка", 100),
+            "📤 Отправка: 100%\n[██████████]"
+        );
     }
 }
 

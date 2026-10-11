@@ -46,8 +46,9 @@ RUN pip install --no-cache-dir --upgrade \
 # Copy the compiled edibls binary from builder
 COPY --from=builder /usr/src/edibls/target/release/edibls /usr/local/bin/edibls
 
-# Run as a dedicated non-root user
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+# Run as a dedicated non-root user (with write access to Python site-packages/bin for yt-dlp auto-updates)
+RUN useradd -m -u 1000 appuser \
+    && chown -R appuser:appuser /app /usr/local/lib/python3.12 /usr/local/bin
 USER appuser
 
-ENTRYPOINT ["/usr/local/bin/edibls"]
+ENTRYPOINT ["/bin/sh", "-c", "pip install -q --no-cache-dir -U 'yt-dlp[default,curl-cffi]' || true; exec /usr/local/bin/edibls"]

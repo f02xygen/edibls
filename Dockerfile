@@ -41,7 +41,7 @@ RUN curl -fsSL https://deno.land/install.sh | sh \
 # Install fresh yt-dlp and yandex-music-downloader
 RUN pip install --no-cache-dir --upgrade \
     yt-dlp \
-    yandex-music-downloader
+    https://github.com/llistochek/yandex-music-downloader/archive/main.zip
 
 # Copy the compiled edibls binary from builder
 COPY --from=builder /usr/src/edibls/target/release/edibls /usr/local/bin/edibls

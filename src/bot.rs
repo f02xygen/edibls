@@ -7,27 +7,106 @@ use tempfile::TempDir;
 
 use crate::cache::{CachedMedia, MediaCache};
 use crate::config::Config;
-use crate::media::{MediaOutput, extract_search_query, extract_url, fetch_media, is_audio_request};
-use crate::providers::yandex::{YandexTrackInfo, search_yandex_tracks};
+use crate::media::{
+    extract_ph_search_query, extract_search_query, extract_url, fetch_media, is_audio_request,
+    MediaOutput,
+};
+use crate::providers::pornhub::{search_pornhub_videos, PornhubVideoInfo};
+use crate::providers::yandex::{search_yandex_tracks, YandexTrackInfo};
 use crate::queue::QueueManager;
+use crate::settings::{QualityPreference, UserSettings, UserSettingsStore};
 
 const WELCOME_MESSAGE: &str = "\
 <b>EDIBLS</b> — бот для скачивания видео и музыки.
 
-<b>Площадки:</b> YouTube, TikTok, Instagram, Яндекс Музыка, SoundCloud, VK и др.
+<b>Площадки:</b> YouTube, TikTok, Instagram, Pornhub, Яндекс Музыка, SoundCloud, VK и др.
 
 <b>Как пользоваться:</b>
 • <b>Видео:</b> просто отправь ссылку (под видео появится кнопка для извлечения MP3).
 • <b>Аудио по ссылке:</b> используй <code>/audio &lt;ссылка&gt;</code> или отправь ссылку на Яндекс Музыку.
-• <b>Поиск трека (Яндекс Музыка):</b> напиши название трека (и исполнителя) в ЛС или используй <code>/ym &lt;запрос&gt;</code> / <code>/audio &lt;запрос&gt;</code>.
+• <b>Поиск на Pornhub:</b> используй <code>/ph &lt;запрос&gt;</code>
+• <b>Поиск на Яндекс Музыке:</b> напиши название трека в ЛС или используй <code>/ym &lt;запрос&gt;</code>.
+• <b>Настройки качества:</b> используй команду <code>/settings</code>.
 
-<i>Лимиты: до 50 МБ, длительность до 20 минут.</i>";
+<i>Поддерживаются ролики в высоком качестве (до 2 ГБ) без водяных знаков.</i>";
 
 fn build_audio_button(url_id: u64) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::callback(
         "Скачать MP3",
         format!("audio:{url_id}"),
     )]])
+}
+
+fn build_quality_selection_keyboard(url_id: u64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            InlineKeyboardButton::callback("🎬 1080p", format!("q:1080:{url_id}")),
+            InlineKeyboardButton::callback("🎬 720p", format!("q:720:{url_id}")),
+        ],
+        vec![
+            InlineKeyboardButton::callback("🎬 480p", format!("q:480:{url_id}")),
+            InlineKeyboardButton::callback("🎬 360p", format!("q:360:{url_id}")),
+            InlineKeyboardButton::callback("🎬 240p", format!("q:240:{url_id}")),
+        ],
+        vec![
+            InlineKeyboardButton::callback("🎵 Только аудио (MP3)", format!("audio:{url_id}")),
+        ],
+        vec![
+            InlineKeyboardButton::callback("❌ Отмена", "q:cancel"),
+        ],
+    ])
+}
+
+fn build_settings_text(settings: &UserSettings) -> String {
+    let q_desc = match settings.quality {
+        QualityPreference::AutoBest => "Авто (скачивать в максимальном качестве)",
+        QualityPreference::AskEveryTime => "Вручную (спрашивать разрешение перед каждым видео)",
+    };
+    let a_desc = if settings.audio_only {
+        "<b>ВКЛЮЧЕН</b> (все ссылки автоматически скачиваются как MP3 аудио)"
+    } else {
+        "<b>ВЫКЛЮЧЕН</b> (видео отправляются как видео)"
+    };
+
+    format!(
+        "<b>⚙️ Настройки загрузки</b>\n\n\
+        • <b>Качество видео:</b> {q_desc}\n\
+        • <b>Режим «Только аудио»:</b> {a_desc}\n\n\
+        <i>Нажми на кнопку ниже, чтобы изменить параметр:</i>"
+    )
+}
+
+fn build_settings_keyboard(settings: &UserSettings) -> InlineKeyboardMarkup {
+    let auto_mark = if settings.quality == QualityPreference::AutoBest {
+        "✅ "
+    } else {
+        "🔘 "
+    };
+    let manual_mark = if settings.quality == QualityPreference::AskEveryTime {
+        "✅ "
+    } else {
+        "🔘 "
+    };
+    let audio_mark = if settings.audio_only {
+        "ВКЛ ✅"
+    } else {
+        "ВЫКЛ ❌"
+    };
+
+    InlineKeyboardMarkup::new(vec![
+        vec![InlineKeyboardButton::callback(
+            format!("{auto_mark}Авто (лучшее качество)"),
+            "settings:q:auto",
+        )],
+        vec![InlineKeyboardButton::callback(
+            format!("{manual_mark}Вручную (спрашивать качество)"),
+            "settings:q:manual",
+        )],
+        vec![InlineKeyboardButton::callback(
+            format!("🎵 Только аудио: {audio_mark}"),
+            "settings:toggle:audio",
+        )],
+    ])
 }
 
 fn build_track_selection_keyboard(tracks: &[YandexTrackInfo]) -> InlineKeyboardMarkup {
@@ -49,6 +128,25 @@ fn build_track_selection_keyboard(tracks: &[YandexTrackInfo]) -> InlineKeyboardM
     InlineKeyboardMarkup::new(rows)
 }
 
+fn build_ph_selection_keyboard(videos: &[PornhubVideoInfo]) -> InlineKeyboardMarkup {
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = videos
+        .iter()
+        .map(|video| {
+            vec![InlineKeyboardButton::callback(
+                video.button_label(),
+                format!("ph:{}", video.vkey),
+            )]
+        })
+        .collect();
+
+    rows.push(vec![InlineKeyboardButton::callback(
+        "❌ Отмена",
+        "ph:cancel",
+    )]);
+
+    InlineKeyboardMarkup::new(rows)
+}
+
 pub async fn process_and_send_media(
     bot: &Bot,
     chat_id: ChatId,
@@ -56,12 +154,13 @@ pub async fn process_and_send_media(
     user_id: UserId,
     url: &str,
     audio_only: bool,
+    max_height: Option<u16>,
     config: &Arc<Config>,
     queue: &QueueManager,
     cache: &MediaCache,
 ) -> ResponseResult<()> {
     // 1. Fast path: check Telegram file_id cache (0.1s instant response, bypasses queue)
-    if let Some(cached) = cache.get(url, audio_only) {
+    if let Some(cached) = cache.get(url, audio_only, max_height) {
         match cached {
             CachedMedia::Video(file_id) => {
                 let url_id = cache.register_url(url);
@@ -142,7 +241,7 @@ pub async fn process_and_send_media(
         }
     };
 
-    let media_result = fetch_media(url, audio_only, temp_dir.path(), config).await;
+    let media_result = fetch_media(url, audio_only, max_height, temp_dir.path(), config).await;
 
     // Release domain & global download slot immediately so next user can start downloading
     drop(service_guard);
@@ -190,7 +289,7 @@ pub async fn process_and_send_media(
             }
 
             if !uploaded_ids.is_empty() {
-                cache.insert(url, true, CachedMedia::Audio(uploaded_ids), total_size);
+                cache.insert(url, true, None, CachedMedia::Audio(uploaded_ids), total_size);
             }
 
             let _ = bot.delete_message(chat_id, status_msg.id).await;
@@ -216,17 +315,24 @@ pub async fn process_and_send_media(
                         cache.insert(
                             url,
                             false,
+                            max_height,
                             CachedMedia::Video(video.file.id.clone()),
                             u64::from(video.file.size),
                         );
                     }
+                    let _ = bot.delete_message(chat_id, status_msg.id).await;
                 }
                 Err(e) => {
                     log::error!("Failed to send video {:?}: {:?}", file_path, e);
+                    let _ = bot
+                        .edit_message_text(
+                            chat_id,
+                            status_msg.id,
+                            format!("Ошибка отправки видео в Telegram: {e}"),
+                        )
+                        .await;
                 }
             }
-
-            let _ = bot.delete_message(chat_id, status_msg.id).await;
         }
         Err(err) => {
             bot.edit_message_text(chat_id, status_msg.id, format!("Ошибка: {err}"))
@@ -279,6 +385,7 @@ async fn handle_yandex_search(
                 user_id,
                 &url,
                 true,
+                None,
                 config,
                 queue,
                 cache,
@@ -313,12 +420,58 @@ async fn handle_yandex_search(
     Ok(())
 }
 
+async fn handle_pornhub_search(
+    bot: &Bot,
+    chat_id: ChatId,
+    reply_to: Option<MessageId>,
+    query: &str,
+) -> ResponseResult<()> {
+    match search_pornhub_videos(query).await {
+        Ok(videos) if videos.is_empty() => {
+            let mut req = bot.send_message(
+                chat_id,
+                format!("По запросу «{query}» ничего не найдено на Pornhub."),
+            );
+            if let Some(msg_id) = reply_to {
+                req = req.reply_parameters(ReplyParameters::new(msg_id));
+            }
+            req.await?;
+        }
+        Ok(videos) => {
+            let mut req = bot
+                .send_message(
+                    chat_id,
+                    format!("Результаты поиска на Pornhub по запросу «{query}»:"),
+                )
+                .reply_markup(build_ph_selection_keyboard(&videos));
+            if let Some(msg_id) = reply_to {
+                req = req.reply_parameters(ReplyParameters::new(msg_id));
+            }
+            req.await?;
+        }
+        Err(e) => {
+            log::error!("Pornhub search error for query {:?}: {:?}", query, e);
+            let mut req = bot.send_message(
+                chat_id,
+                format!("Ошибка при поиске на Pornhub: {e}"),
+            );
+            if let Some(msg_id) = reply_to {
+                req = req.reply_parameters(ReplyParameters::new(msg_id));
+            }
+            req.await?;
+        }
+    }
+
+    Ok(())
+}
+
 pub async fn handle_message(
     bot: Bot,
     msg: Message,
     config: Arc<Config>,
     queue: QueueManager,
     cache: MediaCache,
+    settings: UserSettingsStore,
 ) -> ResponseResult<()> {
     let user_id = match &msg.from {
         Some(user) => user.id,
@@ -340,20 +493,50 @@ pub async fn handle_message(
             return Ok(());
         }
 
+        if trimmed == "/settings" || trimmed.starts_with("/settings@") {
+            let user_settings = settings.get(user_id);
+            bot.send_message(msg.chat.id, build_settings_text(&user_settings))
+                .parse_mode(ParseMode::Html)
+                .reply_markup(build_settings_keyboard(&user_settings))
+                .reply_parameters(ReplyParameters::new(msg.id))
+                .await?;
+            return Ok(());
+        }
+
+        if let Some(query) = extract_ph_search_query(trimmed) {
+            handle_pornhub_search(&bot, msg.chat.id, Some(msg.id), query).await?;
+            return Ok(());
+        }
+
         if let Some(url) = extract_url(trimmed) {
-            let audio_only = is_audio_request(url, trimmed);
-            process_and_send_media(
-                &bot,
-                msg.chat.id,
-                Some(msg.id),
-                user_id,
-                url,
-                audio_only,
-                &config,
-                &queue,
-                &cache,
-            )
-            .await?;
+            let user_settings = settings.get(user_id);
+            let audio_only = is_audio_request(url, trimmed, user_settings.audio_only);
+
+            // If user prefers manual quality selection and it is not an audio request or Yandex Music
+            if !audio_only
+                && user_settings.quality == QualityPreference::AskEveryTime
+                && !crate::providers::yandex::is_yandex_music_url(url)
+            {
+                let url_id = cache.register_url(url);
+                bot.send_message(msg.chat.id, "Выбери желаемое качество для этого видео:")
+                    .reply_markup(build_quality_selection_keyboard(url_id))
+                    .reply_parameters(ReplyParameters::new(msg.id))
+                    .await?;
+            } else {
+                process_and_send_media(
+                    &bot,
+                    msg.chat.id,
+                    Some(msg.id),
+                    user_id,
+                    url,
+                    audio_only,
+                    None,
+                    &config,
+                    &queue,
+                    &cache,
+                )
+                .await?;
+            }
         } else if let Some(query) = extract_search_query(trimmed, msg.chat.is_private()) {
             handle_yandex_search(
                 &bot,
@@ -370,7 +553,7 @@ pub async fn handle_message(
             // Only send fallback hint in private chats so the bot stays quiet in group chats
             bot.send_message(
                 msg.chat.id,
-                "Отправь ссылку на видео/аудио, напиши название трека для поиска на Яндекс Музыке или используй <code>/ym &lt;запрос&gt;</code>.",
+                "Отправь ссылку на видео/аудио, используй <code>/ph &lt;запрос&gt;</code> для поиска на Pornhub, или напиши название трека для поиска на Яндекс Музыке.",
             )
             .parse_mode(ParseMode::Html)
             .reply_parameters(ReplyParameters::new(msg.id))
@@ -386,10 +569,45 @@ pub async fn handle_callback(
     config: Arc<Config>,
     queue: QueueManager,
     cache: MediaCache,
+    settings: UserSettingsStore,
 ) -> ResponseResult<()> {
     let Some(data) = q.data.as_deref() else {
         return Ok(());
     };
+
+    if let Some(sub) = data.strip_prefix("settings:") {
+        let user_id = q.from.id;
+        let updated = match sub {
+            "q:auto" => settings.set_quality(user_id, QualityPreference::AutoBest),
+            "q:manual" => settings.set_quality(user_id, QualityPreference::AskEveryTime),
+            "toggle:audio" => settings.toggle_audio_only(user_id),
+            _ => settings.get(user_id),
+        };
+
+        let alert_text = match sub {
+            "q:auto" => "Качество: Авто (лучшее качество)",
+            "q:manual" => "Качество: Вручную перед скачиванием",
+            "toggle:audio" => {
+                if updated.audio_only {
+                    "Режим «Только аудио» ВКЛЮЧЕН"
+                } else {
+                    "Режим «Только аудио» ВЫКЛЮЧЕН"
+                }
+            }
+            _ => "Настройки обновлены",
+        };
+
+        let _ = bot.answer_callback_query(q.id.clone()).text(alert_text).await;
+
+        if let Some(msg) = q.regular_message() {
+            let _ = bot
+                .edit_message_text(msg.chat.id, msg.id, build_settings_text(&updated))
+                .parse_mode(ParseMode::Html)
+                .reply_markup(build_settings_keyboard(&updated))
+                .await;
+        }
+        return Ok(());
+    }
 
     if let Some(id_str) = data.strip_prefix("audio:") {
         let Ok(url_id) = id_str.parse::<u64>() else {
@@ -398,7 +616,7 @@ pub async fn handle_callback(
 
         let Some(url) = cache.resolve_url(url_id) else {
             bot.answer_callback_query(q.id)
-                .text("Ссылка устарела, отправь её заново с /audio")
+                .text("Ссылка устарела, отправь её заново")
                 .await?;
             return Ok(());
         };
@@ -422,11 +640,129 @@ pub async fn handle_callback(
                 q.from.id,
                 &url,
                 true,
+                None,
                 &config,
                 &queue,
                 &cache,
             )
             .await?;
+        }
+    } else if let Some(q_payload) = data.strip_prefix("q:") {
+        if q_payload == "cancel" {
+            let _ = bot.answer_callback_query(q.id.clone()).await;
+            if let Some(msg) = q.regular_message() {
+                let _ = bot.delete_message(msg.chat.id, msg.id).await;
+            }
+            return Ok(());
+        }
+
+        // Format is q:<height>:<url_id>
+        let parts: Vec<&str> = q_payload.split(':').collect();
+        if parts.len() == 2 {
+            let Ok(height) = parts[0].parse::<u16>() else {
+                return Ok(());
+            };
+            let Ok(url_id) = parts[1].parse::<u64>() else {
+                return Ok(());
+            };
+
+            let Some(url) = cache.resolve_url(url_id) else {
+                bot.answer_callback_query(q.id)
+                    .text("Ссылка устарела, отправь её заново")
+                    .await?;
+                return Ok(());
+            };
+
+            let _ = bot
+                .answer_callback_query(q.id.clone())
+                .text(format!("Скачиваю в {height}p..."))
+                .await;
+
+            if let Some(msg) = q.regular_message() {
+                let chat_id = msg.chat.id;
+                let reply_to = msg.reply_to_message().map(|m| m.id);
+                let _ = bot.delete_message(chat_id, msg.id).await;
+
+                process_and_send_media(
+                    &bot,
+                    chat_id,
+                    reply_to,
+                    q.from.id,
+                    &url,
+                    false,
+                    Some(height),
+                    &config,
+                    &queue,
+                    &cache,
+                )
+                .await?;
+            }
+        }
+    } else if let Some(ph_payload) = data.strip_prefix("ph:") {
+        if ph_payload == "cancel" {
+            let _ = bot.answer_callback_query(q.id.clone()).await;
+            if let Some(msg) = q.regular_message() {
+                let _ = bot.delete_message(msg.chat.id, msg.id).await;
+            }
+            return Ok(());
+        }
+
+        let url = format!("https://www.pornhub.com/view_video.php?viewkey={ph_payload}");
+        let user_settings = settings.get(q.from.id);
+
+        if let Some(msg) = q.regular_message() {
+            let chat_id = msg.chat.id;
+            let reply_to = msg.reply_to_message().map(|m| m.id);
+
+            if user_settings.audio_only {
+                let _ = bot
+                    .answer_callback_query(q.id.clone())
+                    .text("Скачиваю аудио (MP3)...")
+                    .await;
+                let _ = bot.delete_message(chat_id, msg.id).await;
+
+                process_and_send_media(
+                    &bot,
+                    chat_id,
+                    reply_to,
+                    q.from.id,
+                    &url,
+                    true,
+                    None,
+                    &config,
+                    &queue,
+                    &cache,
+                )
+                .await?;
+            } else if user_settings.quality == QualityPreference::AskEveryTime {
+                let _ = bot.answer_callback_query(q.id.clone()).await;
+                let url_id = cache.register_url(&url);
+
+                let _ = bot
+                    .edit_message_text(chat_id, msg.id, "Выбери желаемое качество для этого видео:")
+                    .reply_markup(build_quality_selection_keyboard(url_id))
+                    .await;
+            } else {
+                let _ = bot
+                    .answer_callback_query(q.id.clone())
+                    .text("Скачиваю выбранное видео...")
+                    .await;
+                let _ = bot.delete_message(chat_id, msg.id).await;
+
+                process_and_send_media(
+                    &bot,
+                    chat_id,
+                    reply_to,
+                    q.from.id,
+                    &url,
+                    false,
+                    None,
+                    &config,
+                    &queue,
+                    &cache,
+                )
+                .await?;
+            }
         }
     } else if let Some(ym_payload) = data.strip_prefix("ym:") {
         if ym_payload == "cancel" {
@@ -459,6 +795,7 @@ pub async fn handle_callback(
                 q.from.id,
                 &url,
                 true,
+                None,
                 &config,
                 &queue,
                 &cache,
@@ -469,4 +806,3 @@ pub async fn handle_callback(
 
     Ok(())
 }
-

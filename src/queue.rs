@@ -1,3 +1,4 @@
+use crate::providers::pornhub::is_pornhub_url;
 use crate::providers::yandex::is_yandex_music_url;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,6 +12,7 @@ pub enum Service {
     TikTok,
     YouTube,
     Instagram,
+    Pornhub,
     Other,
 }
 
@@ -21,6 +23,7 @@ impl Service {
             Service::TikTok,
             Service::YouTube,
             Service::Instagram,
+            Service::Pornhub,
             Service::Other,
         ]
     }
@@ -28,6 +31,8 @@ impl Service {
     pub fn from_url(url: &str) -> Self {
         if is_yandex_music_url(url) {
             Service::Yandex
+        } else if is_pornhub_url(url) {
+            Service::Pornhub
         } else if url.contains("tiktok.com") {
             Service::TikTok
         } else if url.contains("youtube.com") || url.contains("youtu.be") {
@@ -45,6 +50,7 @@ impl Service {
             Service::TikTok => "TikTok",
             Service::YouTube => "YouTube",
             Service::Instagram => "Instagram",
+            Service::Pornhub => "Pornhub",
             Service::Other => "сторонним ресурсам",
         }
     }

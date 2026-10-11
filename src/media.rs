@@ -26,6 +26,27 @@ pub fn extract_url(text: &str) -> Option<&str> {
         .find(|word| word.starts_with("http://") || word.starts_with("https://"))
 }
 
+/// Extracts a Pornhub search query from the message text (/ph <query> or /pornhub <query>).
+pub fn extract_ph_search_query(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || extract_url(trimmed).is_some() {
+        return None;
+    }
+
+    if let Some(first_word) = trimmed.split_whitespace().next() {
+        if first_word.starts_with('/') {
+            let cmd = first_word.split('@').next().unwrap_or(first_word);
+            if matches!(cmd, "/ph" | "/pornhub") {
+                let rest = trimmed[first_word.len()..].trim();
+                if !rest.is_empty() {
+                    return Some(rest);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Extracts a Yandex Music track search query from the message text.
 /// Supports `/ym <query>`, `/audio <query>`, `/mp3 <query>`, `/search <query>` in any chat,
 /// as well as plain text (without links or slash commands) in private chats.
@@ -56,8 +77,9 @@ pub fn extract_search_query(text: &str, is_private: bool) -> Option<&str> {
 }
 
 /// Determines whether the request should be processed as audio-only.
-pub fn is_audio_request(url: &str, text: &str) -> bool {
-    is_yandex_music_url(url)
+pub fn is_audio_request(url: &str, text: &str, user_audio_only_setting: bool) -> bool {
+    user_audio_only_setting
+        || is_yandex_music_url(url)
         || text.starts_with("/audio")
         || text.starts_with("/mp3")
         || text.contains("audio")
@@ -116,6 +138,7 @@ async fn process_tracks_blocking(files: Vec<PathBuf>) -> Vec<AudioTrack> {
 pub async fn fetch_media(
     url: &str,
     audio_only: bool,
+    max_height: Option<u16>,
     temp_dir: &Path,
     config: &Config,
 ) -> Result<MediaOutput, String> {
@@ -133,7 +156,7 @@ pub async fn fetch_media(
         return Ok(MediaOutput::Audio(tracks));
     }
 
-    let file_path = download_media(url, audio_only, temp_dir, config).await?;
+    let file_path = download_media(url, audio_only, max_height, temp_dir, config).await?;
 
     if audio_only {
         let tracks = process_tracks_blocking(vec![file_path]).await;
@@ -160,6 +183,25 @@ mod tests {
         assert_eq!(extract_search_query("/audio Кукушка", true), Some("Кукушка"));
         assert_eq!(extract_search_query("/audio https://youtu.be/abc", true), None);
         assert_eq!(extract_search_query("/ym", true), None);
+        assert_eq!(extract_search_query("/ph test", true), None);
+    }
+
+    #[test]
+    fn test_extract_ph_search_query() {
+        assert_eq!(extract_ph_search_query("/ph minecraft"), Some("minecraft"));
+        assert_eq!(extract_ph_search_query("/ph@edibls_bot blonde pov"), Some("blonde pov"));
+        assert_eq!(extract_ph_search_query("/pornhub test query"), Some("test query"));
+        assert_eq!(extract_ph_search_query("/ph"), None);
+        assert_eq!(extract_ph_search_query("/ph https://pornhub.com/view_video.php?viewkey=123"), None);
+        assert_eq!(extract_ph_search_query("just words"), None);
+    }
+
+    #[test]
+    fn test_is_audio_request() {
+        assert!(is_audio_request("https://youtube.com/watch?v=123", "/audio https://youtube.com/watch?v=123", false));
+        assert!(is_audio_request("https://music.yandex.ru/track/123", "https://music.yandex.ru/track/123", false));
+        assert!(is_audio_request("https://pornhub.com/view_video.php?viewkey=123", "https://pornhub.com/view_video.php?viewkey=123", true));
+        assert!(!is_audio_request("https://pornhub.com/view_video.php?viewkey=123", "https://pornhub.com/view_video.php?viewkey=123", false));
     }
 }
 

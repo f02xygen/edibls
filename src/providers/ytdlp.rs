@@ -22,6 +22,12 @@ pub async fn download_media(
         "50M",
         "--match-filter",
         "duration <= 1200", // Max 20 minutes
+        "--concurrent-fragments",
+        "8",
+        "--http-chunk-size",
+        "10M",
+        "--no-mtime",
+        "--no-part",
         "--js-runtimes",
         "deno",
         "--js-runtimes",
@@ -38,11 +44,22 @@ pub async fn download_media(
     cmd.arg("--extractor-args").arg(yt_extractor_args);
 
     if audio_only {
-        cmd.args(["-x", "--audio-format", "mp3"]);
+        cmd.args([
+            "-x",
+            "--audio-format",
+            "mp3",
+            "--embed-metadata",
+            "--postprocessor-args",
+            "ffmpeg:-threads 0",
+        ]);
     } else {
         cmd.args([
             "-f",
             "b[filesize<=50M]/bestvideo[filesize<=50M]+bestaudio/best[filesize<=50M]/best",
+            "-S",
+            "vcodec:h264,fps,res,acodec:m4a",
+            "--merge-output-format",
+            "mp4",
         ]);
     }
 

@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use image::ImageFormat;
+use image::imageops::FilterType;
 use lofty::prelude::*;
 use lofty::probe::Probe;
 
@@ -42,7 +43,7 @@ pub fn process_audio_metadata(file_path: &Path) -> AudioTrack {
 
             if let Some(picture) = tag.pictures().first() {
                 if let Ok(img) = image::load_from_memory(picture.data()) {
-                    let resized = img.thumbnail(320, 320);
+                    let resized = img.resize(320, 320, FilterType::Triangle);
                     if resized
                         .save_with_format(&cover_path, ImageFormat::Jpeg)
                         .is_ok()
@@ -62,6 +63,18 @@ pub fn process_audio_metadata(file_path: &Path) -> AudioTrack {
     }
 }
 
+/// Offloads blocking tag & cover image processing to the blocking threadpool.
+async fn process_tracks_blocking(files: Vec<PathBuf>) -> Vec<AudioTrack> {
+    tokio::task::spawn_blocking(move || {
+        files
+            .into_iter()
+            .map(|f| process_audio_metadata(&f))
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
 /// High-level function to handle download and metadata parsing for any supported platform.
 pub async fn fetch_media(
     url: &str,
@@ -79,7 +92,7 @@ pub async fn fetch_media(
             .await
             .map_err(|e| e.to_string())?;
 
-        let tracks = files.iter().map(|f| process_audio_metadata(f)).collect();
+        let tracks = process_tracks_blocking(files).await;
         return Ok(MediaOutput::Audio(tracks));
     }
 
@@ -90,8 +103,8 @@ pub async fn fetch_media(
     let file_path = download_media(url, audio_only, temp_dir, config).await?;
 
     if audio_only {
-        let track = process_audio_metadata(&file_path);
-        Ok(MediaOutput::Audio(vec![track]))
+        let tracks = process_tracks_blocking(vec![file_path]).await;
+        Ok(MediaOutput::Audio(tracks))
     } else {
         Ok(MediaOutput::Video(file_path))
     }

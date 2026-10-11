@@ -77,7 +77,6 @@ pub struct ServiceGuard {
     _domain_guard: OwnedMutexGuard<()>,
     _global_guard: OwnedSemaphorePermit,
     _waiter_guard: WaiterGuard,
-    _user_guard: UserGuard,
 }
 
 #[derive(Clone)]
@@ -130,12 +129,7 @@ impl QueueManager {
     }
 
     /// Waits for both the per-domain lock and a global download slot, returning RAII `ServiceGuard`.
-    pub async fn acquire(
-        &self,
-        service: Service,
-        waiter_guard: WaiterGuard,
-        user_guard: UserGuard,
-    ) -> ServiceGuard {
+    pub async fn acquire(&self, service: Service, waiter_guard: WaiterGuard) -> ServiceGuard {
         let lock_arc = Arc::clone(self.domain_locks.get(&service).unwrap());
         let domain_guard = lock_arc.lock_owned().await;
         let global_guard = Arc::clone(&self.global_semaphore)
@@ -147,7 +141,6 @@ impl QueueManager {
             _domain_guard: domain_guard,
             _global_guard: global_guard,
             _waiter_guard: waiter_guard,
-            _user_guard: user_guard,
         }
     }
 }

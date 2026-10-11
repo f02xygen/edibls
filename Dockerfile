@@ -15,7 +15,12 @@ COPY src ./src
 RUN touch src/main.rs && cargo build --release
 
 # ==========================================
-# 2. Runtime Stage: Python + FFmpeg + Deno/Node + yt-dlp + yandex-music-downloader
+# 2. Local Telegram Bot API Stage
+# ==========================================
+FROM aiogram/telegram-bot-api:latest AS tg-api
+
+# ==========================================
+# 3. Runtime Stage: Python + FFmpeg + Deno/Node + yt-dlp + yandex-music-downloader + telegram-bot-api
 # ==========================================
 FROM python:3.12-slim-bookworm
 
@@ -42,6 +47,17 @@ RUN curl -fsSL https://deno.land/install.sh | sh \
 RUN pip install --no-cache-dir --upgrade \
     "yt-dlp[default,curl-cffi]" \
     https://github.com/llistochek/yandex-music-downloader/archive/main.zip
+
+# Copy local Telegram Bot API server binary and its musl runtime libraries (for 2GB uploads)
+COPY --from=tg-api /usr/local/bin/telegram-bot-api /usr/local/bin/telegram-bot-api
+COPY --from=tg-api /lib/ld-musl-*.so.1 /lib/
+COPY --from=tg-api \
+    /usr/lib/libssl.so.3 \
+    /usr/lib/libcrypto.so.3 \
+    /usr/lib/libz.so.1* \
+    /usr/lib/libstdc++.so.6* \
+    /usr/lib/libgcc_s.so.1 \
+    /usr/lib/
 
 # Copy the compiled edibls binary from builder
 COPY --from=builder /usr/src/edibls/target/release/edibls /usr/local/bin/edibls

@@ -72,11 +72,12 @@ async fn run_ytdlp_once(
     let output_template_str = output_template.to_string_lossy();
 
     let max_filesize_str = format!("{}M", config.max_filesize_mb);
-    let match_filter = format!("duration <= {}", config.max_duration_secs);
+    let match_filter = format!("duration <=? {}", config.max_duration_secs);
 
     // For Pornhub CDN (ev.phncdn.com), rate=500k&burst=1600k/3800k throttles large single chunks.
     // Setting chunk size to 1M lets each range request download at unthrottled burst speed.
-    let http_chunk_size = if is_pornhub_url(url) { "1M" } else { "10M" };
+    let is_ph = is_pornhub_url(url);
+    let http_chunk_size = if is_ph { "1M" } else { "10M" };
 
     let mut cmd = Command::new("yt-dlp");
 
@@ -120,9 +121,13 @@ async fn run_ytdlp_once(
         ]);
     } else if let Some(height) = max_height {
         let format_selector = format!(
-            "bestvideo[height<={height}][filesize<={max_filesize_str}]+bestaudio/best[height<={height}][filesize<={max_filesize_str}]/bestvideo[height<={height}]+bestaudio/best[height<={height}]"
+            "bestvideo[height<={height}][filesize<={max_filesize_str}]+bestaudio/bestvideo[height<={height}][filesize_approx<={max_filesize_str}]+bestaudio/best[height<={height}][filesize<={max_filesize_str}]/best[height<={height}][filesize_approx<={max_filesize_str}]/bestvideo[height<={height}]+bestaudio/best[height<={height}]"
         );
-        let sort_criteria = format!("res:{height},vcodec:h264,fps,acodec:m4a");
+        let sort_criteria = if is_ph {
+            format!("proto:https,res:{height},vcodec:h264,fps,acodec:m4a")
+        } else {
+            format!("res:{height},vcodec:h264,fps,acodec:m4a")
+        };
         cmd.args([
             "-f",
             &format_selector,
@@ -133,13 +138,18 @@ async fn run_ytdlp_once(
         ]);
     } else {
         let format_selector = format!(
-            "b[filesize<={max_filesize_str}]/bestvideo[filesize<={max_filesize_str}]+bestaudio/best[filesize<={max_filesize_str}]/best"
+            "b[filesize<={max_filesize_str}]/b[filesize_approx<={max_filesize_str}]/bestvideo[filesize<={max_filesize_str}]+bestaudio/bestvideo[filesize_approx<={max_filesize_str}]+bestaudio/best[filesize<={max_filesize_str}]/best[filesize_approx<={max_filesize_str}]/best"
         );
+        let sort_criteria = if is_ph {
+            "proto:https,vcodec:h264,fps,res,acodec:m4a"
+        } else {
+            "vcodec:h264,fps,res,acodec:m4a"
+        };
         cmd.args([
             "-f",
             &format_selector,
             "-S",
-            "vcodec:h264,fps,res,acodec:m4a",
+            sort_criteria,
             "--merge-output-format",
             "mp4",
         ]);
@@ -215,6 +225,25 @@ async fn run_ytdlp_once(
             if !file_path_str.is_empty() {
                 let path = PathBuf::from(file_path_str);
                 if path.exists() {
+                    let max_bytes = config.max_filesize_mb * 1024 * 1024;
+                    if let Ok(meta) = tokio::fs::metadata(&path).await {
+                        if meta.len() > max_bytes {
+                            log::warn!(
+                                "Downloaded file {:?} ({} bytes) exceeds max_filesize ({} bytes); removing",
+                                path,
+                                meta.len(),
+                                max_bytes
+                            );
+                            let _ = tokio::fs::remove_file(&path).await;
+                            return Err((
+                                format!(
+                                    "Размер файла превышает лимит в {} МБ",
+                                    config.max_filesize_mb
+                                ),
+                                true,
+                            ));
+                        }
+                    }
                     progress.store(100, Ordering::Relaxed);
                     log::info!("Downloaded file saved at: {:?}", path);
                     return Ok(path);
@@ -226,7 +255,7 @@ async fn run_ytdlp_once(
     let combined = format!("{stdout}\n{stderr}");
     log::error!("yt-dlp execution failed or skipped: {}", combined.trim());
 
-    if combined.contains("does not pass filter duration") {
+    if combined.contains("does not pass filter") && combined.contains("duration") {
         Err((
             format!(
                 "Видео слишком длинное (максимум {} минут)",

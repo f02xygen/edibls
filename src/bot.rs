@@ -424,13 +424,75 @@ pub async fn process_and_send_media(
                 }
                 Err(e) => {
                     log::error!("Failed to send video {:?}: {:?}", file_path, e);
-                    let _ = bot
-                        .edit_message_text(
-                            chat_id,
-                            status_msg.id,
-                            format!("Ошибка отправки видео в Telegram: {e}"),
+                    let err_str = e.to_string();
+                    let mut recovered = false;
+
+                    if err_str.contains("Request Entity Too Large") && config.max_filesize_mb > 49 {
+                        log::warn!(
+                            "Telegram rejected video with Request Entity Too Large; retrying {} with 49MB limit",
+                            url
+                        );
+                        let _ = tokio::fs::remove_file(&file_path).await;
+                        let mut fallback_cfg = (**config).clone();
+                        fallback_cfg.max_filesize_mb = 49;
+                        dl_progress.store(0, Ordering::Relaxed);
+                        let _ = bot
+                            .edit_message_text(
+                                chat_id,
+                                status_msg.id,
+                                format_progress_bar("📥 Сжатие до 49 МБ", 0),
+                            )
+                            .await;
+
+                        if let Ok(MediaOutput::Video(smaller_path)) = fetch_media(
+                            url,
+                            false,
+                            Some(480),
+                            temp_dir.path(),
+                            &fallback_cfg,
+                            &dl_progress,
                         )
-                        .await;
+                        .await
+                        {
+                            let _ = bot
+                                .edit_message_text(
+                                    chat_id,
+                                    status_msg.id,
+                                    format_progress_bar("📤 Отправка", 50),
+                                )
+                                .await;
+                            let mut retry_req = bot
+                                .send_video(chat_id, InputFile::file(&smaller_path))
+                                .supports_streaming(true)
+                                .reply_markup(build_audio_button(url_id));
+                            if let Some(msg_id) = reply_to {
+                                retry_req = retry_req.reply_parameters(ReplyParameters::new(msg_id));
+                            }
+                            if let Ok(sent_msg) = retry_req.await {
+                                if let Some(video) = sent_msg.video() {
+                                    cache.insert(
+                                        url,
+                                        false,
+                                        max_height,
+                                        CachedMedia::Video(video.file.id.clone()),
+                                        u64::from(video.file.size),
+                                    );
+                                }
+                                let _ = bot.delete_message(chat_id, status_msg.id).await;
+                                recovered = true;
+                            }
+                        }
+                    }
+
+                    if !recovered {
+                        let _ = bot
+                            .edit_message_text(
+                                chat_id,
+                                status_msg.id,
+                                format!("Ошибка отправки видео в Telegram: {e}"),
+                            )
+                            .await;
+                    }
                 }
             }
         }

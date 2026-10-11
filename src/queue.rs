@@ -1,9 +1,9 @@
-use crate::yandex::is_yandex_music_url;
+use crate::providers::yandex::is_yandex_music_url;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use teloxide::types::UserId;
-use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex as TokioMutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Service {
@@ -57,29 +57,33 @@ pub struct UserGuard {
 
 impl Drop for UserGuard {
     fn drop(&mut self) {
-        if let Ok(mut set) = self.active_users.try_lock() {
+        if let Ok(mut set) = self.active_users.lock() {
             set.remove(&self.user_id);
         }
+    }
+}
+
+pub struct WaiterGuard {
+    waiters: Arc<AtomicUsize>,
+}
+
+impl Drop for WaiterGuard {
+    fn drop(&mut self) {
+        self.waiters.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
 pub struct ServiceGuard {
     _domain_guard: OwnedMutexGuard<()>,
     _global_guard: OwnedSemaphorePermit,
+    _waiter_guard: WaiterGuard,
     _user_guard: UserGuard,
-    waiters: Arc<AtomicUsize>,
-}
-
-impl Drop for ServiceGuard {
-    fn drop(&mut self) {
-        self.waiters.fetch_sub(1, Ordering::SeqCst);
-    }
 }
 
 #[derive(Clone)]
 pub struct QueueManager {
     global_semaphore: Arc<Semaphore>,
-    domain_locks: Arc<HashMap<Service, Arc<Mutex<()>>>>,
+    domain_locks: Arc<HashMap<Service, Arc<TokioMutex<()>>>>,
     domain_waiters: Arc<HashMap<Service, Arc<AtomicUsize>>>,
     active_users: Arc<Mutex<HashSet<UserId>>>,
 }
@@ -90,7 +94,7 @@ impl QueueManager {
         let mut waiters = HashMap::new();
 
         for &s in Service::all() {
-            locks.insert(s, Arc::new(Mutex::new(())));
+            locks.insert(s, Arc::new(TokioMutex::new(())));
             waiters.insert(s, Arc::new(AtomicUsize::new(0)));
         }
 
@@ -102,40 +106,48 @@ impl QueueManager {
         }
     }
 
-    /// Tries to lock the user for a single active task. Returns false if user already has an active download.
-    pub async fn try_lock_user(&self, user_id: UserId) -> bool {
-        let mut users = self.active_users.lock().await;
-        users.insert(user_id)
-    }
-
-    pub fn unlock_user(&self, user_id: UserId) {
-        if let Ok(mut users) = self.active_users.try_lock() {
-            users.remove(&user_id);
+    /// Tries to acquire a download lock for a user.
+    /// Returns `Some(UserGuard)` if allowed, or `None` if the user already has an active task.
+    pub fn try_lock_user(&self, user_id: UserId) -> Option<UserGuard> {
+        let mut users = self.active_users.lock().ok()?;
+        if users.insert(user_id) {
+            Some(UserGuard {
+                user_id,
+                active_users: Arc::clone(&self.active_users),
+            })
+        } else {
+            None
         }
     }
 
-    pub fn register(&self, url: &str) -> (Service, usize) {
+    /// Registers the request in the service queue and returns the service type, position,
+    /// and a `WaiterGuard` that automatically decrements the position counter on drop.
+    pub fn register(&self, url: &str) -> (Service, usize, WaiterGuard) {
         let service = Service::from_url(url);
-        let waiters = self.domain_waiters.get(&service).unwrap();
+        let waiters = Arc::clone(self.domain_waiters.get(&service).unwrap());
         let pos = waiters.fetch_add(1, Ordering::SeqCst) + 1;
-        (service, pos)
+        (service, pos, WaiterGuard { waiters })
     }
 
-    pub async fn acquire(&self, service: Service, user_id: UserId) -> ServiceGuard {
-        let lock_arc = self.domain_locks.get(&service).unwrap().clone();
-        let waiters_arc = self.domain_waiters.get(&service).unwrap().clone();
-
+    /// Waits for both the per-domain lock and a global download slot, returning RAII `ServiceGuard`.
+    pub async fn acquire(
+        &self,
+        service: Service,
+        waiter_guard: WaiterGuard,
+        user_guard: UserGuard,
+    ) -> ServiceGuard {
+        let lock_arc = Arc::clone(self.domain_locks.get(&service).unwrap());
         let domain_guard = lock_arc.lock_owned().await;
-        let global_guard = self.global_semaphore.clone().acquire_owned().await.unwrap();
+        let global_guard = Arc::clone(&self.global_semaphore)
+            .acquire_owned()
+            .await
+            .expect("global semaphore closed unexpectedly");
 
         ServiceGuard {
             _domain_guard: domain_guard,
             _global_guard: global_guard,
-            _user_guard: UserGuard {
-                user_id,
-                active_users: self.active_users.clone(),
-            },
-            waiters: waiters_arc,
+            _waiter_guard: waiter_guard,
+            _user_guard: user_guard,
         }
     }
 }

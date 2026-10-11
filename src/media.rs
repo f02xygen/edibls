@@ -2,10 +2,10 @@ use std::path::{Path, PathBuf};
 use image::ImageFormat;
 use lofty::prelude::*;
 use lofty::probe::Probe;
-use tempfile::TempDir;
 
-use crate::downloader::download_media;
-use crate::yandex::{download_yandex_track, is_yandex_music_url};
+use crate::config::Config;
+use crate::providers::yandex::{download_yandex_track, is_yandex_music_url};
+use crate::providers::ytdlp::download_media;
 
 pub struct AudioTrack {
     pub path: PathBuf,
@@ -66,15 +66,16 @@ pub fn process_audio_metadata(file_path: &Path) -> AudioTrack {
 pub async fn fetch_media(
     url: &str,
     text: &str,
-    yandex_token: Option<&str>,
     temp_dir: &Path,
+    config: &Config,
 ) -> Result<MediaOutput, String> {
     if is_yandex_music_url(url) {
-        let token = yandex_token
-            .filter(|t| !t.is_empty())
-            .ok_or_else(|| "YANDEX_MUSIC_TOKEN is not configured in .env file.".to_string())?;
+        let token = config
+            .yandex_music_token
+            .as_deref()
+            .ok_or_else(|| "YANDEX_MUSIC_TOKEN не настроен в .env файле.".to_string())?;
 
-        let files = download_yandex_track(url, token, temp_dir)
+        let files = download_yandex_track(url, token, temp_dir, config)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -86,7 +87,7 @@ pub async fn fetch_media(
         || text.starts_with("/mp3")
         || text.contains("audio");
 
-    let file_path = download_media(url, audio_only).await?;
+    let file_path = download_media(url, audio_only, temp_dir, config).await?;
 
     if audio_only {
         let track = process_audio_metadata(&file_path);

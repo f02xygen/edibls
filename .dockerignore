@@ -1,0 +1,14 @@
+target/
+venv/
+.venv/
+.git/
+.env
+*.log
+*.mp3
+*.mp4
+*.m4a
+*.webm
+*.jpg
+*.jpeg
+*.png
+*.webp

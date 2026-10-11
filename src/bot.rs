@@ -11,37 +11,19 @@ use crate::media::{MediaOutput, extract_url, fetch_media, is_audio_request};
 use crate::queue::QueueManager;
 
 const WELCOME_MESSAGE: &str = "\
-👋 <b>Привет! Я EDIBLS — бот для быстрого скачивания видео и музыки.</b>
+<b>EDIBLS</b> — бот для скачивания видео и музыки.
 
-✨ <b>Поддерживаемые площадки:</b>
-• 🎬 <b>YouTube и Shorts</b> — видео в MP4 или аудиодорожка
-• 📱 <b>TikTok</b> — видео без водяных знаков или звук
-• 📸 <b>Instagram</b> — Reels и видео-посты
-• 🎵 <b>Яндекс Музыка</b> — треки, альбомы и плейлисты с обложками и ID3-тегами
-• 🌐 <b>1000+ других сайтов</b> — SoundCloud, VK, Twitter/X, Reddit, Twitch Clips и др.
+<b>Площадки:</b> YouTube, TikTok, Instagram, Яндекс Музыка, SoundCloud, VK и др.
 
-🚀 <b>Как пользоваться:</b>
-1️⃣ <b>Скачать видео:</b>
-Просто отправь ссылку в чат:
-<code>https://youtu.be/...</code> или <code>https://vt.tiktok.com/...</code>
-<i>(Под каждым видео появится кнопка «🎵 Скачать аудио (MP3)» для быстрого извлечения звука!)</i>
+<b>Как пользоваться:</b>
+• <b>Видео:</b> просто отправь ссылку (под видео появится кнопка для извлечения MP3).
+• <b>Аудио:</b> используй <code>/audio &lt;ссылка&gt;</code> или отправь ссылку на Яндекс Музыку.
 
-2️⃣ <b>Скачать сразу аудио (MP3 с метаданными):</b>
-Используй команду <code>/audio</code>, <code>/mp3</code> или припиши <code>audio</code> к ссылке:
-<code>/audio https://youtu.be/...</code>
-<code>/mp3 https://vt.tiktok.com/...</code>
-
-3️⃣ <b>Яндекс Музыка:</b>
-Просто отправь ссылку на трек или альбом — бот сам скачает аудио с обложкой, названием и автором.
-
-ℹ️ <b>Ограничения и фишки:</b>
-• Максимальный размер файла: <b>50 МБ</b> (лимит Telegram Bot API)
-• Максимальная длительность ролика: <b>20 минут</b>
-• ⚡ <b>Мгновенный кэш:</b> повторные ссылки отправляются за 0.1 сек без ожидания очереди!";
+<i>Лимиты: до 50 МБ, длительность до 20 минут.</i>";
 
 fn build_audio_button(url_id: u64) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::callback(
-        "🎵 Скачать аудио (MP3)",
+        "Скачать MP3",
         format!("audio:{url_id}"),
     )]])
 }
@@ -91,7 +73,7 @@ pub async fn process_and_send_media(
         None => {
             let mut req = bot.send_message(
                 chat_id,
-                "⚠️ У тебя уже скачивается один файл! Дождись его завершения.",
+                "У тебя уже скачивается один файл. Дождись его завершения.",
             );
             if let Some(msg_id) = reply_to {
                 req = req.reply_parameters(ReplyParameters::new(msg_id));
@@ -105,12 +87,12 @@ pub async fn process_and_send_media(
 
     let status_text = if pos > 1 {
         format!(
-            "⏳ Сервис по {} сейчас занят. Твоя позиция в очереди: {}...",
+            "Сервис по {} сейчас занят. Твоя позиция в очереди: {}...",
             service.name(),
             pos
         )
     } else {
-        "⏳ Ожидание слота загрузки...".to_string()
+        "Ожидание слота загрузки...".to_string()
     };
 
     let mut status_req = bot.send_message(chat_id, status_text);
@@ -123,7 +105,7 @@ pub async fn process_and_send_media(
     let service_guard = queue.acquire(service, waiter_guard).await;
 
     let _ = bot
-        .edit_message_text(chat_id, status_msg.id, "⏳ Начинаю скачивание...")
+        .edit_message_text(chat_id, status_msg.id, "Начинаю скачивание...")
         .await;
 
     let temp_dir = match TempDir::new() {
@@ -132,7 +114,7 @@ pub async fn process_and_send_media(
             bot.edit_message_text(
                 chat_id,
                 status_msg.id,
-                format!("❌ Не удалось создать временную директорию: {e}"),
+                format!("Не удалось создать временную директорию: {e}"),
             )
             .await?;
             return Ok(());
@@ -149,7 +131,7 @@ pub async fn process_and_send_media(
             bot.edit_message_text(
                 chat_id,
                 status_msg.id,
-                format!("📤 Отправляю {} аудио...", tracks.len()),
+                format!("Отправляю {} аудио...", tracks.len()),
             )
             .await?;
 
@@ -193,7 +175,7 @@ pub async fn process_and_send_media(
             let _ = bot.delete_message(chat_id, status_msg.id).await;
         }
         Ok(MediaOutput::Video(file_path)) => {
-            bot.edit_message_text(chat_id, status_msg.id, "📤 Отправляю видео...")
+            bot.edit_message_text(chat_id, status_msg.id, "Отправляю видео...")
                 .await?;
 
             let url_id = cache.register_url(url);
@@ -226,7 +208,7 @@ pub async fn process_and_send_media(
             let _ = bot.delete_message(chat_id, status_msg.id).await;
         }
         Err(err) => {
-            bot.edit_message_text(chat_id, status_msg.id, format!("❌ Ошибка: {err}"))
+            bot.edit_message_text(chat_id, status_msg.id, format!("Ошибка: {err}"))
                 .await?;
         }
     }
@@ -307,14 +289,14 @@ pub async fn handle_callback(
 
         let Some(url) = cache.resolve_url(url_id) else {
             bot.answer_callback_query(q.id)
-                .text("⚠️ Ссылка устарела, отправь её заново с /audio")
+                .text("Ссылка устарела, отправь её заново с /audio")
                 .await?;
             return Ok(());
         };
 
         let _ = bot
             .answer_callback_query(q.id.clone())
-            .text("🎵 Извлекаю аудио (MP3)...")
+            .text("Извлекаю аудио (MP3)...")
             .await;
 
         if let Some(msg) = q.regular_message() {

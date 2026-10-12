@@ -38,7 +38,9 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Deploy to Server via SSH
-        if: ${{ secrets.SERVER_HOST != '' }}
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+        if: env.SERVER_HOST != ''
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SERVER_HOST }}

@@ -568,15 +568,45 @@ pub async fn download_spotify_entity(
     config: &Config,
     progress: &Arc<AtomicU8>,
 ) -> Result<Vec<AudioTrack>> {
-    let entity = fetch_spotify_entity(url).await?;
+    // Start at 10% immediately so user sees immediate feedback
+    progress.store(10, Ordering::Relaxed);
+
+    let prog_ticker = Arc::clone(progress);
+    let ticker_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let cur = prog_ticker.load(Ordering::Relaxed);
+            if cur < 90 {
+                prog_ticker.store(cur.saturating_add(8).min(90), Ordering::Relaxed);
+            }
+        }
+    });
+
+    let entity = match fetch_spotify_entity(url).await {
+        Ok(e) => e,
+        Err(err) => {
+            ticker_task.abort();
+            return Err(err);
+        }
+    };
 
     match entity {
         SpotifyEntity::Track(track) => {
-            let audio_track = download_spotify_track(&track, temp_dir, config, progress).await?;
+            let audio_track = match download_spotify_track(&track, temp_dir, config, progress).await {
+                Ok(t) => t,
+                Err(err) => {
+                    ticker_task.abort();
+                    return Err(err);
+                }
+            };
+            ticker_task.abort();
             progress.store(100, Ordering::Relaxed);
             Ok(vec![audio_track])
         }
         SpotifyEntity::Album { title, tracks } | SpotifyEntity::Playlist { title, tracks } => {
+            ticker_task.abort();
             if tracks.is_empty() {
                 return Err(anyhow!("В альбоме/плейлисте «{title}» не найдено доступных треков"));
             }
@@ -585,6 +615,23 @@ pub async fn download_spotify_entity(
             let mut downloaded = Vec::new();
 
             for (idx, track) in tracks.iter().enumerate() {
+                let base_pct = ((idx * 100) / total) as u8;
+                let next_pct = (((idx + 1) * 100) / total) as u8;
+                progress.store(base_pct.max(5), Ordering::Relaxed);
+
+                let track_ticker_prog = Arc::clone(progress);
+                let track_ticker = tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_millis(400));
+                    interval.tick().await;
+                    loop {
+                        interval.tick().await;
+                        let cur = track_ticker_prog.load(Ordering::Relaxed);
+                        if cur < next_pct.saturating_sub(2) {
+                            track_ticker_prog.store(cur.saturating_add(3).min(next_pct.saturating_sub(2)), Ordering::Relaxed);
+                        }
+                    }
+                });
+
                 let track_progress = Arc::new(AtomicU8::new(0));
                 match download_spotify_track(track, temp_dir, config, &track_progress).await {
                     Ok(t) => downloaded.push(t),
@@ -592,18 +639,20 @@ pub async fn download_spotify_entity(
                         log::warn!("Failed to download track «{}» from {}: {e}", track.title, title);
                     }
                 }
-                let overall = (((idx + 1) * 100) / total) as u8;
-                progress.store(overall.min(100), Ordering::Relaxed);
+                track_ticker.abort();
+                progress.store(next_pct, Ordering::Relaxed);
             }
 
             if downloaded.is_empty() {
                 return Err(anyhow!("Не удалось скачать ни один трек из коллекции «{title}»"));
             }
 
+            progress.store(100, Ordering::Relaxed);
             Ok(downloaded)
         }
     }
 }
+
 
 #[cfg(test)]
 mod tests {

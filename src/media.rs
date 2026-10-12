@@ -5,6 +5,7 @@ use lofty::prelude::*;
 use lofty::probe::Probe;
 
 use crate::config::Config;
+use crate::providers::soundcloud::is_soundcloud_url;
 use crate::providers::yandex::{download_yandex_track, is_yandex_music_url};
 use crate::providers::ytdlp::download_media;
 
@@ -24,6 +25,48 @@ pub enum MediaOutput {
 pub fn extract_url(text: &str) -> Option<&str> {
     text.split_whitespace()
         .find(|word| word.starts_with("http://") || word.starts_with("https://"))
+}
+
+/// Extracts a SoundCloud search query from the message text (/sc <query> or /soundcloud <query>).
+pub fn extract_sc_search_query(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || extract_url(trimmed).is_some() {
+        return None;
+    }
+
+    if let Some(first_word) = trimmed.split_whitespace().next() {
+        if first_word.starts_with('/') {
+            let cmd = first_word.split('@').next().unwrap_or(first_word);
+            if matches!(cmd, "/sc" | "/soundcloud") {
+                let rest = trimmed[first_word.len()..].trim();
+                if !rest.is_empty() {
+                    return Some(rest);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extracts a YouTube search query from the message text (/yt <query> or /youtube <query>).
+pub fn extract_yt_search_query(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || extract_url(trimmed).is_some() {
+        return None;
+    }
+
+    if let Some(first_word) = trimmed.split_whitespace().next() {
+        if first_word.starts_with('/') {
+            let cmd = first_word.split('@').next().unwrap_or(first_word);
+            if matches!(cmd, "/yt" | "/youtube") {
+                let rest = trimmed[first_word.len()..].trim();
+                if !rest.is_empty() {
+                    return Some(rest);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Extracts a Pornhub search query from the message text (/ph <query> or /pornhub <query>).
@@ -80,8 +123,10 @@ pub fn extract_search_query(text: &str, is_private: bool) -> Option<&str> {
 pub fn is_audio_request(url: &str, text: &str, user_audio_only_setting: bool) -> bool {
     user_audio_only_setting
         || is_yandex_music_url(url)
+        || is_soundcloud_url(url)
         || text.starts_with("/audio")
         || text.starts_with("/mp3")
+        || text.starts_with("/sc")
         || text.contains("audio")
 }
 
@@ -183,7 +228,7 @@ pub async fn fetch_media(
             .as_deref()
             .ok_or_else(|| "YANDEX_MUSIC_TOKEN не настроен в .env файле.".to_string())?;
 
-        let files = download_yandex_track(url, token, temp_dir, config)
+        let files = download_yandex_track(url, token, temp_dir, config, progress)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -220,6 +265,26 @@ mod tests {
         assert_eq!(extract_search_query("/audio https://youtu.be/abc", true), None);
         assert_eq!(extract_search_query("/ym", true), None);
         assert_eq!(extract_search_query("/ph test", true), None);
+    }
+
+    #[test]
+    fn test_extract_sc_search_query() {
+        assert_eq!(extract_sc_search_query("/sc marry me"), Some("marry me"));
+        assert_eq!(extract_sc_search_query("/sc@edibls_bot drake"), Some("drake"));
+        assert_eq!(extract_sc_search_query("/soundcloud test query"), Some("test query"));
+        assert_eq!(extract_sc_search_query("/sc"), None);
+        assert_eq!(extract_sc_search_query("/sc https://soundcloud.com/test"), None);
+        assert_eq!(extract_sc_search_query("just words"), None);
+    }
+
+    #[test]
+    fn test_extract_yt_search_query() {
+        assert_eq!(extract_yt_search_query("/yt rick astley"), Some("rick astley"));
+        assert_eq!(extract_yt_search_query("/yt@edibls_bot rick astley"), Some("rick astley"));
+        assert_eq!(extract_yt_search_query("/youtube rick astley"), Some("rick astley"));
+        assert_eq!(extract_yt_search_query("/yt"), None);
+        assert_eq!(extract_yt_search_query("/yt https://youtube.com/watch?v=123"), None);
+        assert_eq!(extract_yt_search_query("just words"), None);
     }
 
     #[test]

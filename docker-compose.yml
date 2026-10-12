@@ -1,6 +1,6 @@
 services:
   edibls:
-    image: edibls:latest
+    image: ghcr.io/f02xygen/edibls:latest
     build:
       context: .
       dockerfile: Dockerfile

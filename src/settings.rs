@@ -12,11 +12,20 @@ pub enum QualityPreference {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum YandexQualityPreference {
+    #[default]
+    Optimal, // AAC 192kbps (fast download & upload, ~10 MB)
+    Lossless, // FLAC (lossless, 50-80 MB)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct UserSettings {
     #[serde(default)]
     pub quality: QualityPreference,
     #[serde(default)]
-    pub audio_only: bool, // If true, all media requests are extracted as MP3
+    pub audio_only: bool, // If true, all media requests are extracted as audio
+    #[serde(default)]
+    pub ym_quality: YandexQualityPreference,
 }
 
 #[derive(Clone)]
@@ -74,6 +83,19 @@ impl UserSettingsStore {
         updated
     }
 
+    pub fn toggle_ym_quality(&self, user_id: UserId) -> UserSettings {
+        let mut guard = self.inner.lock().unwrap();
+        let entry = guard.entry(user_id.0).or_default();
+        entry.ym_quality = match entry.ym_quality {
+            YandexQualityPreference::Optimal => YandexQualityPreference::Lossless,
+            YandexQualityPreference::Lossless => YandexQualityPreference::Optimal,
+        };
+        let updated = *entry;
+        drop(guard);
+        self.save();
+        updated
+    }
+
     fn save(&self) {
         let guard = self.inner.lock().unwrap();
         match serde_json::to_string_pretty(&*guard) {
@@ -106,6 +128,7 @@ mod tests {
         assert_eq!(store.get(uid), UserSettings {
             quality: QualityPreference::AutoBest,
             audio_only: false,
+            ym_quality: YandexQualityPreference::Optimal,
         });
 
         let updated = store.toggle_audio_only(uid);
@@ -115,9 +138,13 @@ mod tests {
         let updated_q = store.set_quality(uid, QualityPreference::AskEveryTime);
         assert_eq!(updated_q.quality, QualityPreference::AskEveryTime);
 
+        let updated_ym = store.toggle_ym_quality(uid);
+        assert_eq!(updated_ym.ym_quality, YandexQualityPreference::Lossless);
+
         // Reload store from same file
         let reloaded = UserSettingsStore::load_or_create(tmp.path());
         assert_eq!(reloaded.get(uid).quality, QualityPreference::AskEveryTime);
         assert_eq!(reloaded.get(uid).audio_only, true);
+        assert_eq!(reloaded.get(uid).ym_quality, YandexQualityPreference::Lossless);
     }
 }

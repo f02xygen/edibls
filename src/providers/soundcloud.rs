@@ -56,8 +56,180 @@ pub fn is_soundcloud_url(url: &str) -> bool {
     lower.contains("soundcloud.com") || lower.contains("on.soundcloud.com")
 }
 
-/// Searches SoundCloud tracks using yt-dlp flat-playlist scsearch.
+fn sc_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(8))
+            .build()
+            .unwrap_or_default()
+    })
+}
+
+static SC_CLIENT_ID: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+async fn get_sc_client_id(client: &reqwest::Client) -> Option<String> {
+    if let Ok(guard) = SC_CLIENT_ID.read() {
+        if let Some(ref id) = *guard {
+            return Some(id.clone());
+        }
+    }
+
+    // Try reading cached client_id from disk
+    for cache_path in [
+        "/home/appuser/.cache/yt-dlp/soundcloud/client_id.json",
+        "/root/.cache/yt-dlp/soundcloud/client_id.json",
+    ] {
+        if let Ok(content) = tokio::fs::read_to_string(cache_path).await {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(id) = val.get("data").and_then(|v| v.as_str()) {
+                    if !id.is_empty() {
+                        if let Ok(mut guard) = SC_CLIENT_ID.write() {
+                            *guard = Some(id.to_string());
+                        }
+                        return Some(id.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: scrape from soundcloud.com
+    let html = client
+        .get("https://soundcloud.com")
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .send()
+        .await
+        .ok()?
+        .text()
+        .await
+        .ok()?;
+
+    let mut script_urls = Vec::new();
+    for part in html.split("src=\"") {
+        if let Some(url) = part.split('"').next() {
+            if url.contains("sndcdn.com/assets/") && url.ends_with(".js") {
+                script_urls.push(url.to_string());
+            }
+        }
+    }
+
+    for script_url in script_urls.into_iter().rev().take(5) {
+        if let Ok(js) = client.get(&script_url).send().await {
+            if let Ok(text) = js.text().await {
+                if let Some(idx) = text.find("client_id:\"") {
+                    let rest = &text[idx + "client_id:\"".len()..];
+                    if let Some(end) = rest.find('"') {
+                        let id = &rest[..end];
+                        if id.len() > 10 && id.chars().all(|c| c.is_ascii_alphanumeric()) {
+                            if let Ok(mut guard) = SC_CLIENT_ID.write() {
+                                *guard = Some(id.to_string());
+                            }
+                            return Some(id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+async fn search_soundcloud_direct(query: &str) -> Result<Vec<SoundcloudTrackInfo>> {
+    let client = sc_http_client();
+    let client_id = get_sc_client_id(client)
+        .await
+        .context("Failed to obtain SoundCloud client_id")?;
+
+    let resp = client
+        .get("https://api-v2.soundcloud.com/search/tracks")
+        .query(&[
+            ("q", query),
+            ("limit", "30"),
+            ("offset", "0"),
+            ("linked_partitioning", "1"),
+            ("client_id", &client_id),
+        ])
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let json_val: serde_json::Value = resp.json().await?;
+    let collection = json_val
+        .get("collection")
+        .and_then(|v| v.as_array())
+        .context("No collection in SoundCloud search response")?;
+
+    let mut results = Vec::new();
+    let mut seen_urls = HashSet::new();
+
+    for item in collection {
+        let permalink_url = item
+            .get("permalink_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if permalink_url.is_empty() || !seen_urls.insert(permalink_url.to_string()) {
+            continue;
+        }
+
+        let id = match item.get("id") {
+            Some(serde_json::Value::Number(n)) => n.to_string(),
+            Some(serde_json::Value::String(s)) => s.clone(),
+            _ => permalink_url.to_string(),
+        };
+
+        let title = item
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Без названия")
+            .to_string();
+
+        let uploader = item
+            .pointer("/user/username")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let duration_str = item
+            .get("duration")
+            .and_then(|v| v.as_f64())
+            .map(|d_ms| {
+                let total_secs = (d_ms / 1000.0).round() as u64;
+                let mins = total_secs / 60;
+                let secs = total_secs % 60;
+                format!("{mins}:{secs:02}")
+            });
+
+        results.push(SoundcloudTrackInfo {
+            id,
+            title,
+            uploader,
+            duration_str,
+            url: permalink_url.to_string(),
+        });
+
+        if results.len() >= MAX_SEARCH_RESULTS {
+            break;
+        }
+    }
+
+    if results.is_empty() {
+        anyhow::bail!("No tracks in SoundCloud direct search");
+    }
+
+    Ok(results)
+}
+
+/// Searches SoundCloud tracks using direct API v2, falling back to yt-dlp flat-playlist.
 pub async fn search_soundcloud_tracks(query: &str) -> Result<Vec<SoundcloudTrackInfo>> {
+    // Fast path: direct SoundCloud API v2 search (~0.35s)
+    if let Ok(tracks) = search_soundcloud_direct(query).await {
+        if !tracks.is_empty() {
+            return Ok(tracks);
+        }
+    }
+
     let search_spec = format!("scsearch{MAX_SEARCH_RESULTS}:{query}");
     let output = tokio::time::timeout(
         SEARCH_TIMEOUT,

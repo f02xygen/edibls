@@ -69,15 +69,20 @@ fn build_settings_text(settings: &UserSettings) -> String {
         QualityPreference::AskEveryTime => "Вручную (спрашивать разрешение перед каждым видео)",
     };
     let a_desc = if settings.audio_only {
-        "<b>ВКЛЮЧЕН</b> (все ссылки автоматически скачиваются как MP3 аудио)"
+        "<b>ВКЛЮЧЕН</b> (все ссылки автоматически скачиваются как аудио)"
     } else {
         "<b>ВЫКЛЮЧЕН</b> (видео отправляются как видео)"
+    };
+    let ym_desc = match settings.ym_quality {
+        crate::settings::YandexQualityPreference::Optimal => "Оптимальное (AAC 192k ⚡, быстро и легко)",
+        crate::settings::YandexQualityPreference::Lossless => "Максимальное (FLAC 💎, оригинал без сжатия)",
     };
 
     format!(
         "<b>⚙️ Настройки загрузки</b>\n\n\
         • <b>Качество видео:</b> {q_desc}\n\
-        • <b>Режим «Только аудио»:</b> {a_desc}\n\n\
+        • <b>Режим «Только аудио»:</b> {a_desc}\n\
+        • <b>Яндекс Музыка:</b> {ym_desc}\n\n\
         <i>Нажми на кнопку ниже, чтобы изменить параметр:</i>"
     )
 }
@@ -98,6 +103,10 @@ fn build_settings_keyboard(settings: &UserSettings) -> InlineKeyboardMarkup {
     } else {
         "ВЫКЛ ❌"
     };
+    let ym_mark = match settings.ym_quality {
+        crate::settings::YandexQualityPreference::Optimal => "AAC 192k ⚡ (Быстро)",
+        crate::settings::YandexQualityPreference::Lossless => "FLAC 💎 (Lossless)",
+    };
 
     InlineKeyboardMarkup::new(vec![
         vec![InlineKeyboardButton::callback(
@@ -111,6 +120,10 @@ fn build_settings_keyboard(settings: &UserSettings) -> InlineKeyboardMarkup {
         vec![InlineKeyboardButton::callback(
             format!("🎵 Только аудио: {audio_mark}"),
             "settings:toggle:audio",
+        )],
+        vec![InlineKeyboardButton::callback(
+            format!("🎶 Я.Музыка: {ym_mark}"),
+            "settings:toggle:ym_quality",
         )],
     ])
 }
@@ -396,6 +409,7 @@ pub async fn process_and_send_media(
     url: &str,
     audio_only: bool,
     max_height: Option<u16>,
+    ym_quality: crate::settings::YandexQualityPreference,
     config: &Arc<Config>,
     queue: &QueueManager,
     cache: &MediaCache,
@@ -506,6 +520,7 @@ pub async fn process_and_send_media(
         url,
         audio_only,
         max_height,
+        ym_quality,
         temp_dir.path(),
         config,
         &dl_progress,
@@ -716,6 +731,7 @@ pub async fn process_and_send_media(
                             url,
                             false,
                             Some(480),
+                            ym_quality,
                             temp_dir.path(),
                             &fallback_cfg,
                             &dl_progress,
@@ -786,6 +802,7 @@ async fn handle_yandex_search(
     config: &Arc<Config>,
     queue: &QueueManager,
     cache: &MediaCache,
+    settings: &UserSettingsStore,
 ) -> ResponseResult<()> {
     if config.yandex_music_token.is_none() {
         let mut req = bot.send_message(
@@ -812,6 +829,7 @@ async fn handle_yandex_search(
         }
         Ok(tracks) if tracks.len() == 1 => {
             let url = tracks[0].canonical_url();
+            let user_settings = settings.get(user_id);
             process_and_send_media(
                 bot,
                 chat_id,
@@ -820,6 +838,7 @@ async fn handle_yandex_search(
                 &url,
                 true,
                 None,
+                user_settings.ym_quality,
                 config,
                 queue,
                 cache,
@@ -866,6 +885,7 @@ async fn handle_soundcloud_search(
     config: &Arc<Config>,
     queue: &QueueManager,
     cache: &MediaCache,
+    settings: &UserSettingsStore,
 ) -> ResponseResult<()> {
     let mut status_req = bot.send_message(chat_id, format!("🔍 Ищу на SoundCloud: «{query}»..."));
     if let Some(msg_id) = reply_to {
@@ -886,6 +906,7 @@ async fn handle_soundcloud_search(
         Ok(tracks) if tracks.len() == 1 => {
             let url = tracks[0].url.clone();
             let _ = bot.delete_message(chat_id, status_msg.id).await;
+            let user_settings = settings.get(user_id);
             process_and_send_media(
                 bot,
                 chat_id,
@@ -894,6 +915,7 @@ async fn handle_soundcloud_search(
                 &url,
                 true,
                 None,
+                user_settings.ym_quality,
                 config,
                 queue,
                 cache,
@@ -1086,6 +1108,7 @@ pub async fn handle_message(
                 &config,
                 &queue,
                 &cache,
+                &settings,
             )
             .await?;
             return Ok(());
@@ -1119,6 +1142,7 @@ pub async fn handle_message(
                     url,
                     audio_only,
                     None,
+                    user_settings.ym_quality,
                     &config,
                     &queue,
                     &cache,
@@ -1135,6 +1159,7 @@ pub async fn handle_message(
                 &config,
                 &queue,
                 &cache,
+                &settings,
             )
             .await?;
         } else if msg.chat.is_private() {
@@ -1169,6 +1194,7 @@ pub async fn handle_callback(
             "q:auto" => settings.set_quality(user_id, QualityPreference::AutoBest),
             "q:manual" => settings.set_quality(user_id, QualityPreference::AskEveryTime),
             "toggle:audio" => settings.toggle_audio_only(user_id),
+            "toggle:ym_quality" => settings.toggle_ym_quality(user_id),
             _ => settings.get(user_id),
         };
 
@@ -1182,6 +1208,10 @@ pub async fn handle_callback(
                     "Режим «Только аудио» ВЫКЛЮЧЕН"
                 }
             }
+            "toggle:ym_quality" => match updated.ym_quality {
+                crate::settings::YandexQualityPreference::Optimal => "Яндекс Музыка: AAC 192k ⚡ (Быстро)",
+                crate::settings::YandexQualityPreference::Lossless => "Яндекс Музыка: FLAC 💎 (Lossless)",
+            },
             _ => "Настройки обновлены",
         };
 
@@ -1221,6 +1251,7 @@ pub async fn handle_callback(
             // Remove the inline button so it isn't clicked repeatedly
             let _ = bot.edit_message_reply_markup(chat_id, msg_id).await;
 
+            let user_settings = settings.get(q.from.id);
             process_and_send_media(
                 &bot,
                 chat_id,
@@ -1229,6 +1260,7 @@ pub async fn handle_callback(
                 &url,
                 true,
                 None,
+                user_settings.ym_quality,
                 &config,
                 &queue,
                 &cache,
@@ -1271,6 +1303,7 @@ pub async fn handle_callback(
                 let reply_to = msg.reply_to_message().map(|m| m.id);
                 let _ = bot.delete_message(chat_id, msg.id).await;
 
+                let user_settings = settings.get(q.from.id);
                 process_and_send_media(
                     &bot,
                     chat_id,
@@ -1279,6 +1312,7 @@ pub async fn handle_callback(
                     &url,
                     false,
                     Some(height),
+                    user_settings.ym_quality,
                     &config,
                     &queue,
                     &cache,
@@ -1365,6 +1399,7 @@ pub async fn handle_callback(
                     &url,
                     true,
                     None,
+                    user_settings.ym_quality,
                     &config,
                     &queue,
                     &cache,
@@ -1393,6 +1428,7 @@ pub async fn handle_callback(
                     &url,
                     false,
                     None,
+                    user_settings.ym_quality,
                     &config,
                     &queue,
                     &cache,
@@ -1472,6 +1508,7 @@ pub async fn handle_callback(
             let _ = bot.delete_message(chat_id, msg.id).await;
 
             let url = format!("https://music.yandex.ru/track/{ym_payload}");
+            let user_settings = settings.get(q.from.id);
             process_and_send_media(
                 &bot,
                 chat_id,
@@ -1480,6 +1517,7 @@ pub async fn handle_callback(
                 &url,
                 true,
                 None,
+                user_settings.ym_quality,
                 &config,
                 &queue,
                 &cache,
@@ -1564,6 +1602,7 @@ pub async fn handle_callback(
                     &url,
                     true,
                     None,
+                    user_settings.ym_quality,
                     &config,
                     &queue,
                     &cache,
@@ -1592,6 +1631,7 @@ pub async fn handle_callback(
                     &url,
                     false,
                     None,
+                    user_settings.ym_quality,
                     &config,
                     &queue,
                     &cache,
@@ -1672,6 +1712,7 @@ pub async fn handle_callback(
                             let reply_to = msg.reply_to_message().map(|m| m.id);
                             let _ = bot.delete_message(chat_id, msg.id).await;
 
+                            let user_settings = settings.get(q.from.id);
                             process_and_send_media(
                                 &bot,
                                 chat_id,
@@ -1680,6 +1721,7 @@ pub async fn handle_callback(
                                 &track_url,
                                 true,
                                 None,
+                                user_settings.ym_quality,
                                 &config,
                                 &queue,
                                 &cache,

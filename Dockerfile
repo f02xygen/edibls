@@ -43,9 +43,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -fsSL https://deno.land/install.sh | sh \
     && mv /root/.deno/bin/deno /usr/local/bin/deno || true
 
-# Install fresh yt-dlp (with curl-cffi for TikTok/Cloudflare TLS impersonation) and yandex-music-downloader
+# Install fresh yt-dlp (with curl-cffi for TikTok/Cloudflare TLS impersonation), bgutil pot plugin, and yandex-music-downloader
 RUN pip install --no-cache-dir --upgrade \
     "yt-dlp[default,curl-cffi]" \
+    bgutil-ytdlp-pot-provider \
     https://github.com/llistochek/yandex-music-downloader/archive/main.zip
 
 # Copy local Telegram Bot API server binary and its musl runtime libraries (for 2GB uploads)

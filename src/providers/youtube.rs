@@ -52,8 +52,118 @@ struct RawYouTubeItem {
     ie_key: Option<String>,
 }
 
-/// Searches YouTube videos using yt-dlp flat-playlist ytsearch.
+fn yt_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(8))
+            .build()
+            .unwrap_or_default()
+    })
+}
+
+async fn search_youtube_innertube(query: &str) -> Result<Vec<YouTubeVideoInfo>> {
+    let client = yt_http_client();
+    let body = serde_json::json!({
+        "context": {
+            "client": {
+                "clientName": "WEB",
+                "clientVersion": "2.20260101.00.00",
+                "hl": "ru",
+                "gl": "US"
+            }
+        },
+        "query": query
+    });
+
+    let resp = client
+        .post("https://www.youtube.com/youtubei/v1/search?prettyPrint=false")
+        .json(&body)
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let json_val: serde_json::Value = resp.json().await?;
+    let mut results = Vec::new();
+    let mut seen_ids = HashSet::new();
+
+    let sections = json_val
+        .pointer("/contents/twoColumnSearchResultsRenderer/primaryContents/sectionListRenderer/contents")
+        .and_then(|v| v.as_array());
+
+    if let Some(sections) = sections {
+        for s in sections {
+            let item_contents = s
+                .pointer("/itemSectionRenderer/contents")
+                .and_then(|v| v.as_array());
+            if let Some(contents) = item_contents {
+                for c in contents {
+                    if let Some(vr) = c.get("videoRenderer") {
+                        let Some(id) = vr.get("videoId").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        if id.is_empty() || !seen_ids.insert(id.to_string()) {
+                            continue;
+                        }
+
+                        let title = vr
+                            .pointer("/title/runs")
+                            .and_then(|r| r.as_array())
+                            .map(|runs| {
+                                runs.iter()
+                                    .filter_map(|r| r.get("text").and_then(|t| t.as_str()))
+                                    .collect::<String>()
+                            })
+                            .unwrap_or_else(|| "Без названия".to_string());
+
+                        let uploader = vr
+                            .pointer("/ownerText/runs")
+                            .and_then(|r| r.as_array())
+                            .map(|runs| {
+                                runs.iter()
+                                    .filter_map(|r| r.get("text").and_then(|t| t.as_str()))
+                                    .collect::<String>()
+                            });
+
+                        let duration_str = vr
+                            .pointer("/lengthText/simpleText")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+
+                        results.push(YouTubeVideoInfo {
+                            id: id.to_string(),
+                            title,
+                            uploader,
+                            duration_str,
+                            url: format!("https://www.youtube.com/watch?v={id}"),
+                        });
+
+                        if results.len() >= MAX_SEARCH_RESULTS {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if results.is_empty() {
+        anyhow::bail!("No Innertube search results");
+    }
+
+    Ok(results)
+}
+
+/// Searches YouTube videos using direct Innertube API, falling back to yt-dlp flat-playlist.
 pub async fn search_youtube_videos(query: &str) -> Result<Vec<YouTubeVideoInfo>> {
+    // Fast path: direct Innertube API request (~0.7s)
+    if let Ok(videos) = search_youtube_innertube(query).await {
+        if !videos.is_empty() {
+            return Ok(videos);
+        }
+    }
+
     let search_spec = format!("ytsearch{MAX_SEARCH_RESULTS}:{query}");
     let output = tokio::time::timeout(
         SEARCH_TIMEOUT,

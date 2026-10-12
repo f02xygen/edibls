@@ -179,8 +179,20 @@ async fn main() {
     let config = Arc::new(raw_config);
 
     let queue = QueueManager::new(config.max_concurrent_downloads);
-    let cache = MediaCache::new();
+    let cache = MediaCache::load_or_create(&config.cache_path);
     let settings = UserSettingsStore::load_or_create(&config.settings_path);
+
+    let commands = vec![
+        teloxide::types::BotCommand::new("yt", "Поиск видео и музыки на YouTube"),
+        teloxide::types::BotCommand::new("sc", "Поиск треков на SoundCloud"),
+        teloxide::types::BotCommand::new("ym", "Поиск треков на Яндекс Музыке"),
+        teloxide::types::BotCommand::new("ph", "Поиск видео на Pornhub"),
+        teloxide::types::BotCommand::new("settings", "Настройки качества и режима аудио"),
+        teloxide::types::BotCommand::new("help", "Справка и список команд"),
+    ];
+    if let Err(err) = bot.set_my_commands(commands).await {
+        log::warn!("Failed to register bot commands with Telegram: {:?}", err);
+    }
 
     let handler = dptree::entry()
         .branch(Update::filter_message().endpoint(

@@ -78,6 +78,11 @@ impl UserSettingsStore {
         let guard = self.inner.lock().unwrap();
         match serde_json::to_string_pretty(&*guard) {
             Ok(json) => {
+                if let Some(parent) = self.storage_path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                }
                 if let Err(e) = std::fs::write(&self.storage_path, json) {
                     log::error!("Failed to persist settings to {:?}: {}", self.storage_path, e);
                 }

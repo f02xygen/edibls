@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashSet;
+use std::time::Duration;
 use tokio::process::Command;
 
-const MAX_SEARCH_RESULTS: usize = 8;
+const MAX_SEARCH_RESULTS: usize = 30;
+const SEARCH_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Metadata for a single YouTube video returned from search.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,13 +55,23 @@ struct RawYouTubeItem {
 /// Searches YouTube videos using yt-dlp flat-playlist ytsearch.
 pub async fn search_youtube_videos(query: &str) -> Result<Vec<YouTubeVideoInfo>> {
     let search_spec = format!("ytsearch{MAX_SEARCH_RESULTS}:{query}");
-    let output = Command::new("yt-dlp")
-        .args(["--dump-json", "--flat-playlist", &search_spec])
-        .output()
-        .await
-        .context("Failed to execute yt-dlp for YouTube search")?;
+    let output = tokio::time::timeout(
+        SEARCH_TIMEOUT,
+        Command::new("yt-dlp")
+            .args([
+                "--dump-json",
+                "--flat-playlist",
+                "--no-warnings",
+                "--ignore-errors",
+                &search_spec,
+            ])
+            .output(),
+    )
+    .await
+    .context("YouTube search timed out")?
+    .context("Failed to execute yt-dlp for YouTube search")?;
 
-    if !output.status.success() {
+    if !output.status.success() && output.stdout.is_empty() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         log::error!("yt-dlp ytsearch failed: {}", stderr);
         return Err(anyhow::anyhow!("YouTube search process exited with error"));

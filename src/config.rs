@@ -13,6 +13,7 @@ pub struct Config {
     pub max_filesize_mb: u64,
     pub max_duration_secs: u64,
     pub settings_path: PathBuf,
+    pub cache_path: PathBuf,
 }
 
 impl Config {
@@ -66,6 +67,10 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("settings.json"));
 
+        let cache_path = env::var("CACHE_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("cache.json"));
+
         Self {
             teloxide_token,
             yandex_music_token,
@@ -77,6 +82,7 @@ impl Config {
             max_filesize_mb,
             max_duration_secs,
             settings_path,
+            cache_path,
         }
     }
 }

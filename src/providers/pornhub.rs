@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 const PORNHUB_SEARCH_URL: &str = "https://www.pornhub.com/video/search";
-const MAX_SEARCH_RESULTS: usize = 8;
+const MAX_SEARCH_RESULTS: usize = 30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PornhubVideoInfo {
@@ -160,12 +161,19 @@ pub fn parse_search_html(html: &str) -> Vec<PornhubVideoInfo> {
     results
 }
 
+fn ph_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(12))
+            .build()
+            .unwrap_or_default()
+    })
+}
+
 /// Searches Pornhub for videos matching the query.
 pub async fn search_pornhub_videos(query: &str) -> Result<Vec<PornhubVideoInfo>> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(12))
-        .build()
-        .context("Failed to build HTTP client for Pornhub search")?;
+    let client = ph_http_client();
 
     let resp = client
         .get(PORNHUB_SEARCH_URL)

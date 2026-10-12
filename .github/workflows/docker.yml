@@ -48,8 +48,10 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT || 22 }}
           script: |
+            set -e
             cd ${{ secrets.SERVER_APP_DIR || '~/edibls' }}
             git pull origin main
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             docker compose pull edibls
-            docker compose up -d edibls
+            docker compose up -d --no-build edibls
 

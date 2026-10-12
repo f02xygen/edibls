@@ -20,25 +20,26 @@ use crate::providers::youtube::{search_youtube_videos, YouTubeVideoInfo};
 use crate::queue::QueueManager;
 use crate::settings::{QualityPreference, UserSettings, UserSettingsStore};
 
-const WELCOME_MESSAGE: &str = "<b>EDIBLS</b> — бот для скачивания видео и музыки.
+const WELCOME_MESSAGE: &str = "<b>EDIBLS</b> — бот для быстрой загрузки видео и музыки.
 
-<b>Площадки:</b> YouTube, TikTok, Instagram, SoundCloud, Яндекс Музыка, Pornhub, VK и др.
+<b>Поддерживаемые площадки:</b>
+YouTube, TikTok, Instagram, SoundCloud, Яндекс Музыка, Pornhub, VK и др.
 
 <b>Как пользоваться:</b>
-• <b>Видео:</b> просто отправь ссылку (под видео появится кнопка для извлечения MP3).
-• <b>Аудио по ссылке:</b> используй <code>/audio &lt;ссылка&gt;</code> или отправь ссылку на SoundCloud / Яндекс Музыку.
-• <b>Поиск на YouTube:</b> используй <code>/yt &lt;запрос&gt;</code>.
-• <b>Поиск на SoundCloud:</b> используй <code>/sc &lt;запрос&gt;</code>.
-• <b>Поиск на Яндекс Музыке:</b> напиши название трека в ЛС или используй <code>/ym &lt;запрос&gt;</code>.
-• <b>Поиск на Pornhub:</b> используй <code>/ph &lt;запрос&gt;</code>.
-• <b>Настройки качества:</b> используй команду <code>/settings</code>.
+• <b>Видео:</b> просто отправь ссылку в чат (под видео будет кнопка <code>🎵 Скачать аудио</code>).
+• <b>Только аудио по ссылке:</b> <code>/audio &lt;ссылка&gt;</code> или прямая ссылка на SoundCloud / Яндекс Музыку.
+• <b>Поиск на YouTube:</b> <code>/yt &lt;запрос&gt;</code>
+• <b>Поиск на SoundCloud:</b> <code>/sc &lt;запрос&gt;</code>
+• <b>Поиск на Яндекс Музыке:</b> <code>/ym &lt;запрос&gt;</code> или название трека в ЛС
+• <b>Поиск на Pornhub:</b> <code>/ph &lt;запрос&gt;</code>
+• <b>Настройки:</b> <code>/settings</code> (разрешение видео, режим «только аудио», AAC/FLAC для Я.Музыки)
 
-<i>Поддерживаются ролики в высоком качестве (до 2 ГБ) без водяных знаков.</i>";
+<i>Поддерживаются видео в высоком качестве (до 2 ГБ) без водяных знаков.</i>";
 
 
 fn build_audio_button(url_id: u64) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::callback(
-        "Скачать MP3",
+        "🎵 Скачать аудио",
         format!("audio:{url_id}"),
     )]])
 }
@@ -48,82 +49,95 @@ fn build_quality_selection_keyboard(url_id: u64) -> InlineKeyboardMarkup {
         vec![
             InlineKeyboardButton::callback("🎬 1080p", format!("q:1080:{url_id}")),
             InlineKeyboardButton::callback("🎬 720p", format!("q:720:{url_id}")),
+            InlineKeyboardButton::callback("🎬 480p", format!("q:480:{url_id}")),
         ],
         vec![
-            InlineKeyboardButton::callback("🎬 480p", format!("q:480:{url_id}")),
             InlineKeyboardButton::callback("🎬 360p", format!("q:360:{url_id}")),
             InlineKeyboardButton::callback("🎬 240p", format!("q:240:{url_id}")),
         ],
         vec![
-            InlineKeyboardButton::callback("🎵 Только аудио (MP3)", format!("audio:{url_id}")),
+            InlineKeyboardButton::callback("🎵 Только аудио", format!("audio:{url_id}")),
         ],
         vec![
-            InlineKeyboardButton::callback("❌ Отмена", "q:cancel"),
+            InlineKeyboardButton::callback("✖️ Отмена", "q:cancel"),
         ],
     ])
 }
 
 fn build_settings_text(settings: &UserSettings) -> String {
     let q_desc = match settings.quality {
-        QualityPreference::AutoBest => "Авто (скачивать в максимальном качестве)",
-        QualityPreference::AskEveryTime => "Вручную (спрашивать разрешение перед каждым видео)",
+        QualityPreference::AutoBest => "Авто (максимальное)",
+        QualityPreference::AskEveryTime => "Вручную (выбирать перед скачиванием)",
     };
     let a_desc = if settings.audio_only {
-        "<b>ВКЛЮЧЕН</b> (все ссылки автоматически скачиваются как аудио)"
+        "<b>Включён</b> <i>(видеоссылки → аудио)</i>"
     } else {
-        "<b>ВЫКЛЮЧЕН</b> (видео отправляются как видео)"
+        "Выключен <i>(видео отправляются как видео)</i>"
     };
     let ym_desc = match settings.ym_quality {
-        crate::settings::YandexQualityPreference::Optimal => "Оптимальное (AAC 192k ⚡, быстро и легко)",
-        crate::settings::YandexQualityPreference::Lossless => "Максимальное (FLAC 💎, оригинал без сжатия)",
+        crate::settings::YandexQualityPreference::Optimal => "AAC 192 kbps ⚡ <i>(быстро, ~10 МБ)</i>",
+        crate::settings::YandexQualityPreference::Lossless => "FLAC 💎 <i>(lossless, ~70 МБ)</i>",
     };
 
     format!(
-        "<b>⚙️ Настройки загрузки</b>\n\n\
-        • <b>Качество видео:</b> {q_desc}\n\
-        • <b>Режим «Только аудио»:</b> {a_desc}\n\
-        • <b>Яндекс Музыка:</b> {ym_desc}\n\n\
-        <i>Нажми на кнопку ниже, чтобы изменить параметр:</i>"
+        "⚙️ <b>Настройки загрузки</b>\n\n\
+        🎬 <b>Качество видео:</b> {q_desc}\n\
+        🎶 <b>Яндекс Музыка:</b> {ym_desc}\n\
+        🎵 <b>Только аудио:</b> {a_desc}\n\n\
+        <i>Выбери нужные параметры на кнопках ниже:</i>"
     )
 }
 
 fn build_settings_keyboard(settings: &UserSettings) -> InlineKeyboardMarkup {
-    let auto_mark = if settings.quality == QualityPreference::AutoBest {
-        "✅ "
+    let (auto_mark, manual_mark) = if settings.quality == QualityPreference::AutoBest {
+        ("✅ ", "🔘 ")
     } else {
-        "🔘 "
+        ("🔘 ", "✅ ")
     };
-    let manual_mark = if settings.quality == QualityPreference::AskEveryTime {
-        "✅ "
+
+    let (ym_opt_mark, ym_loss_mark) = match settings.ym_quality {
+        crate::settings::YandexQualityPreference::Optimal => ("✅ ", "🔘 "),
+        crate::settings::YandexQualityPreference::Lossless => ("🔘 ", "✅ "),
+    };
+
+    let audio_label = if settings.audio_only {
+        "🎵 Только аудио: ВКЛ ✅"
     } else {
-        "🔘 "
-    };
-    let audio_mark = if settings.audio_only {
-        "ВКЛ ✅"
-    } else {
-        "ВЫКЛ ❌"
-    };
-    let ym_mark = match settings.ym_quality {
-        crate::settings::YandexQualityPreference::Optimal => "AAC 192k ⚡ (Быстро)",
-        crate::settings::YandexQualityPreference::Lossless => "FLAC 💎 (Lossless)",
+        "🎵 Только аудио: ВЫКЛ ❌"
     };
 
     InlineKeyboardMarkup::new(vec![
+        // Row 1: Video quality — two-column segmented control
+        vec![
+            InlineKeyboardButton::callback(
+                format!("{auto_mark}🎬 Авто (макс.)"),
+                "settings:q:auto",
+            ),
+            InlineKeyboardButton::callback(
+                format!("{manual_mark}🎬 Выбирать"),
+                "settings:q:manual",
+            ),
+        ],
+        // Row 2: Yandex Music quality — two-column segmented control
+        vec![
+            InlineKeyboardButton::callback(
+                format!("{ym_opt_mark}⚡ AAC"),
+                "settings:ym:optimal",
+            ),
+            InlineKeyboardButton::callback(
+                format!("{ym_loss_mark}💎 FLAC"),
+                "settings:ym:lossless",
+            ),
+        ],
+        // Row 3: Audio-only toggle — full width
         vec![InlineKeyboardButton::callback(
-            format!("{auto_mark}Авто (лучшее качество)"),
-            "settings:q:auto",
-        )],
-        vec![InlineKeyboardButton::callback(
-            format!("{manual_mark}Вручную (спрашивать качество)"),
-            "settings:q:manual",
-        )],
-        vec![InlineKeyboardButton::callback(
-            format!("🎵 Только аудио: {audio_mark}"),
+            audio_label,
             "settings:toggle:audio",
         )],
+        // Row 4: Close button — full width
         vec![InlineKeyboardButton::callback(
-            format!("🎶 Я.Музыка: {ym_mark}"),
-            "settings:toggle:ym_quality",
+            "✖️ Закрыть",
+            "settings:close",
         )],
     ])
 }
@@ -414,8 +428,18 @@ pub async fn process_and_send_media(
     queue: &QueueManager,
     cache: &MediaCache,
 ) -> ResponseResult<()> {
+    // For Yandex Music, differentiate AAC vs Lossless in cache using a quality tag in max_height
+    let effective_cache_height = if crate::providers::yandex::is_yandex_music_url(url) {
+        match ym_quality {
+            crate::settings::YandexQualityPreference::Optimal => Some(1),
+            crate::settings::YandexQualityPreference::Lossless => Some(2),
+        }
+    } else {
+        max_height
+    };
+
     // 1. Fast path: check Telegram file_id cache (0.1s instant response, bypasses queue)
-    if let Some(cached) = cache.get(url, audio_only, max_height) {
+    if let Some(cached) = cache.get(url, audio_only, effective_cache_height) {
         match cached {
             CachedMedia::Video(file_id) => {
                 let url_id = cache.register_url(url);
@@ -462,12 +486,12 @@ pub async fn process_and_send_media(
 
     let status_text = if pos > 1 {
         format!(
-            "Сервис по {} сейчас занят. Твоя позиция в очереди: {}...",
+            "⏳ Очередь {} (позиция: {})...",
             service.name(),
             pos
         )
     } else {
-        "Ожидание слота загрузки...".to_string()
+        "⏳ Подготовка к загрузке...".to_string()
     };
 
     let mut status_req = bot.send_message(chat_id, status_text);
@@ -630,7 +654,7 @@ pub async fn process_and_send_media(
                 .await;
 
             if !uploaded_ids.is_empty() {
-                cache.insert(url, true, None, CachedMedia::Audio(uploaded_ids), total_size);
+                cache.insert(url, true, effective_cache_height, CachedMedia::Audio(uploaded_ids), total_size);
             }
 
             let _ = bot.delete_message(chat_id, status_msg.id).await;
@@ -816,19 +840,25 @@ async fn handle_yandex_search(
         return Ok(());
     }
 
+    let mut status_req = bot.send_message(chat_id, format!("🔍 Ищу на Яндекс Музыке: «{query}»..."));
+    if let Some(msg_id) = reply_to {
+        status_req = status_req.reply_parameters(ReplyParameters::new(msg_id));
+    }
+    let status_msg = status_req.await?;
+
     match search_yandex_tracks(query, config.yandex_music_token.as_deref()).await {
         Ok(tracks) if tracks.is_empty() => {
-            let mut req = bot.send_message(
-                chat_id,
-                format!("По запросу «{query}» ничего не найдено на Яндекс Музыке."),
-            );
-            if let Some(msg_id) = reply_to {
-                req = req.reply_parameters(ReplyParameters::new(msg_id));
-            }
-            req.await?;
+            let _ = bot
+                .edit_message_text(
+                    chat_id,
+                    status_msg.id,
+                    format!("По запросу «{query}» ничего не найдено на Яндекс Музыке."),
+                )
+                .await;
         }
         Ok(tracks) if tracks.len() == 1 => {
             let url = tracks[0].canonical_url();
+            let _ = bot.delete_message(chat_id, status_msg.id).await;
             let user_settings = settings.get(user_id);
             process_and_send_media(
                 bot,
@@ -852,24 +882,21 @@ async fn handle_yandex_search(
             let text = format_ym_search_text(query, 0, total_pages);
             let keyboard = build_track_selection_keyboard(search_id, &tracks, 0);
 
-            let mut req = bot
-                .send_message(chat_id, text)
-                .reply_markup(keyboard);
-            if let Some(msg_id) = reply_to {
-                req = req.reply_parameters(ReplyParameters::new(msg_id));
-            }
-            req.await?;
+            let _ = bot
+                .edit_message_text(chat_id, status_msg.id, text)
+                .parse_mode(ParseMode::Html)
+                .reply_markup(keyboard)
+                .await;
         }
         Err(e) => {
             log::error!("Yandex Music search error for query {:?}: {:?}", query, e);
-            let mut req = bot.send_message(
-                chat_id,
-                format!("Ошибка при поиске на Яндекс Музыке: {e}"),
-            );
-            if let Some(msg_id) = reply_to {
-                req = req.reply_parameters(ReplyParameters::new(msg_id));
-            }
-            req.await?;
+            let _ = bot
+                .edit_message_text(
+                    chat_id,
+                    status_msg.id,
+                    format!("Ошибка при поиске на Яндекс Музыке: {e}"),
+                )
+                .await;
         }
     }
 
@@ -1189,21 +1216,33 @@ pub async fn handle_callback(
     };
 
     if let Some(sub) = data.strip_prefix("settings:") {
+        if sub == "close" {
+            let _ = bot.answer_callback_query(q.id.clone()).await;
+            if let Some(msg) = q.regular_message() {
+                let _ = bot.delete_message(msg.chat.id, msg.id).await;
+            }
+            return Ok(());
+        }
+
         let user_id = q.from.id;
         let updated = match sub {
             "q:auto" => settings.set_quality(user_id, QualityPreference::AutoBest),
             "q:manual" => settings.set_quality(user_id, QualityPreference::AskEveryTime),
+            "ym:optimal" => settings.set_ym_quality(user_id, crate::settings::YandexQualityPreference::Optimal),
+            "ym:lossless" => settings.set_ym_quality(user_id, crate::settings::YandexQualityPreference::Lossless),
             "toggle:audio" => settings.toggle_audio_only(user_id),
             "toggle:ym_quality" => settings.toggle_ym_quality(user_id),
             _ => settings.get(user_id),
         };
 
         let alert_text = match sub {
-            "q:auto" => "Качество: Авто (лучшее качество)",
-            "q:manual" => "Качество: Вручную перед скачиванием",
+            "q:auto" => "Качество видео: Авто (максимальное)",
+            "q:manual" => "Качество видео: Вручную перед скачиванием",
+            "ym:optimal" => "Яндекс Музыка: AAC 192 kbps ⚡ (быстро)",
+            "ym:lossless" => "Яндекс Музыка: FLAC 💎 (lossless)",
             "toggle:audio" => {
                 if updated.audio_only {
-                    "Режим «Только аудио» ВКЛЮЧЕН"
+                    "Режим «Только аудио» ВКЛЮЧЁН"
                 } else {
                     "Режим «Только аудио» ВЫКЛЮЧЕН"
                 }
@@ -1241,7 +1280,7 @@ pub async fn handle_callback(
 
         let _ = bot
             .answer_callback_query(q.id.clone())
-            .text("Извлекаю аудио (MP3)...")
+            .text("🎵 Извлекаю аудио...")
             .await;
 
         if let Some(msg) = q.regular_message() {
@@ -1387,7 +1426,7 @@ pub async fn handle_callback(
             if user_settings.audio_only {
                 let _ = bot
                     .answer_callback_query(q.id.clone())
-                    .text("Скачиваю аудио (MP3)...")
+                    .text("🎵 Скачиваю аудио...")
                     .await;
                 let _ = bot.delete_message(chat_id, msg.id).await;
 
@@ -1590,7 +1629,7 @@ pub async fn handle_callback(
             if user_settings.audio_only {
                 let _ = bot
                     .answer_callback_query(q.id.clone())
-                    .text("Скачиваю аудио (MP3)...")
+                    .text("🎵 Скачиваю аудио...")
                     .await;
                 let _ = bot.delete_message(chat_id, msg.id).await;
 
@@ -1883,5 +1922,41 @@ mod tests {
         assert_eq!(nav_row.len(), 2);
         assert_eq!(nav_row[0].text, "⬅️ Назад");
         assert_eq!(nav_row[1].text, "2/2");
+    }
+
+    #[test]
+    fn test_build_settings_keyboard_and_text() {
+        let mut settings = UserSettings::default();
+        let kb = build_settings_keyboard(&settings);
+        // 4 rows: Video (2 cols), YM (2 cols), Audio toggle (1 col), Close (1 col)
+        assert_eq!(kb.inline_keyboard.len(), 4);
+        assert_eq!(kb.inline_keyboard[0].len(), 2);
+        assert_eq!(kb.inline_keyboard[0][0].text, "✅ 🎬 Авто (макс.)");
+        assert_eq!(kb.inline_keyboard[0][1].text, "🔘 🎬 Выбирать");
+
+        assert_eq!(kb.inline_keyboard[1].len(), 2);
+        assert_eq!(kb.inline_keyboard[1][0].text, "✅ ⚡ AAC");
+        assert_eq!(kb.inline_keyboard[1][1].text, "🔘 💎 FLAC");
+
+        assert_eq!(kb.inline_keyboard[2].len(), 1);
+        assert_eq!(kb.inline_keyboard[2][0].text, "🎵 Только аудио: ВЫКЛ ❌");
+
+        assert_eq!(kb.inline_keyboard[3].len(), 1);
+        assert_eq!(kb.inline_keyboard[3][0].text, "✖️ Закрыть");
+
+        settings.quality = QualityPreference::AskEveryTime;
+        settings.ym_quality = crate::settings::YandexQualityPreference::Lossless;
+        settings.audio_only = true;
+        let kb_custom = build_settings_keyboard(&settings);
+        assert_eq!(kb_custom.inline_keyboard[0][0].text, "🔘 🎬 Авто (макс.)");
+        assert_eq!(kb_custom.inline_keyboard[0][1].text, "✅ 🎬 Выбирать");
+        assert_eq!(kb_custom.inline_keyboard[1][0].text, "🔘 ⚡ AAC");
+        assert_eq!(kb_custom.inline_keyboard[1][1].text, "✅ 💎 FLAC");
+        assert_eq!(kb_custom.inline_keyboard[2][0].text, "🎵 Только аудио: ВКЛ ✅");
+
+        let text = build_settings_text(&settings);
+        assert!(text.contains("Вручную"));
+        assert!(text.contains("FLAC"));
+        assert!(text.contains("Включён"));
     }
 }

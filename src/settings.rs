@@ -83,6 +83,16 @@ impl UserSettingsStore {
         updated
     }
 
+    pub fn set_ym_quality(&self, user_id: UserId, ym_quality: YandexQualityPreference) -> UserSettings {
+        let mut guard = self.inner.lock().unwrap();
+        let entry = guard.entry(user_id.0).or_default();
+        entry.ym_quality = ym_quality;
+        let updated = *entry;
+        drop(guard);
+        self.save();
+        updated
+    }
+
     pub fn toggle_ym_quality(&self, user_id: UserId) -> UserSettings {
         let mut guard = self.inner.lock().unwrap();
         let entry = guard.entry(user_id.0).or_default();

@@ -283,6 +283,41 @@ pub async fn fetch_media(
     }
 }
 
+/// Probes video file dimensions (width, height) using ffprobe.
+pub async fn get_video_dimensions(path: &Path) -> Option<(u32, u32)> {
+    let output = tokio::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=s=x:p=0",
+        ])
+        .arg(path)
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let out_str = String::from_utf8_lossy(&output.stdout);
+    let mut parts = out_str.trim().split('x');
+    let width: u32 = parts.next()?.trim().parse().ok()?;
+    let height: u32 = parts.next()?.trim().parse().ok()?;
+
+    if width > 0 && height > 0 {
+        Some((width, height))
+    } else {
+        None
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

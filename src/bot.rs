@@ -10,8 +10,8 @@ use crate::cache::{CachedMedia, MediaCache};
 use crate::config::Config;
 use crate::media::{
     extract_ph_search_query, extract_sc_search_query, extract_search_query, extract_sp_search_query,
-    extract_url, extract_yt_search_query, fetch_media, format_progress_bar, is_audio_request,
-    read_network_tx_bytes, MediaOutput,
+    extract_url, extract_yt_search_query, fetch_media, format_progress_bar, get_video_dimensions,
+    is_audio_request, read_network_tx_bytes, MediaOutput,
 };
 use crate::providers::pornhub::{search_pornhub_videos, PornhubVideoInfo};
 use crate::providers::soundcloud::{search_soundcloud_tracks, SoundcloudTrackInfo};
@@ -489,11 +489,16 @@ pub async fn process_and_send_media(
             });
 
             let url_id = cache.register_url(url);
+            let video_dims = get_video_dimensions(&file_path).await;
             let input_file = InputFile::file(&file_path);
             let mut request = bot
                 .send_video(chat_id, input_file)
                 .supports_streaming(true)
                 .reply_markup(build_audio_button(url_id));
+
+            if let Some((w, h)) = video_dims {
+                request = request.width(w).height(h);
+            }
 
             if let Some(msg_id) = reply_to {
                 request = request.reply_parameters(ReplyParameters::new(msg_id));
@@ -554,10 +559,14 @@ pub async fn process_and_send_media(
                                     format_progress_bar("📤 Отправка", 50),
                                 )
                                 .await;
+                            let smaller_dims = get_video_dimensions(&smaller_path).await;
                             let mut retry_req = bot
                                 .send_video(chat_id, InputFile::file(&smaller_path))
                                 .supports_streaming(true)
                                 .reply_markup(build_audio_button(url_id));
+                            if let Some((w, h)) = smaller_dims {
+                                retry_req = retry_req.width(w).height(h);
+                            }
                             if let Some(msg_id) = reply_to {
                                 retry_req = retry_req.reply_parameters(ReplyParameters::new(msg_id));
                             }

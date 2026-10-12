@@ -26,6 +26,8 @@ pub struct UserSettings {
     pub audio_only: bool, // If true, all media requests are extracted as audio
     #[serde(default)]
     pub ym_quality: YandexQualityPreference,
+    #[serde(default)]
+    pub send_as_document: bool, // If true, media is sent as document without Telegram compression
 }
 
 #[derive(Clone)]
@@ -63,10 +65,24 @@ impl UserSettingsStore {
         guard.get(&user_id.0).copied().unwrap_or_default()
     }
 
+    #[allow(dead_code)]
     pub fn set_quality(&self, user_id: UserId, quality: QualityPreference) -> UserSettings {
         let mut guard = self.inner.lock().unwrap();
         let entry = guard.entry(user_id.0).or_default();
         entry.quality = quality;
+        let updated = *entry;
+        drop(guard);
+        self.save();
+        updated
+    }
+
+    pub fn toggle_quality(&self, user_id: UserId) -> UserSettings {
+        let mut guard = self.inner.lock().unwrap();
+        let entry = guard.entry(user_id.0).or_default();
+        entry.quality = match entry.quality {
+            QualityPreference::AutoBest => QualityPreference::AskEveryTime,
+            QualityPreference::AskEveryTime => QualityPreference::AutoBest,
+        };
         let updated = *entry;
         drop(guard);
         self.save();
@@ -83,6 +99,7 @@ impl UserSettingsStore {
         updated
     }
 
+    #[allow(dead_code)]
     pub fn set_ym_quality(&self, user_id: UserId, ym_quality: YandexQualityPreference) -> UserSettings {
         let mut guard = self.inner.lock().unwrap();
         let entry = guard.entry(user_id.0).or_default();
@@ -100,6 +117,16 @@ impl UserSettingsStore {
             YandexQualityPreference::Optimal => YandexQualityPreference::Lossless,
             YandexQualityPreference::Lossless => YandexQualityPreference::Optimal,
         };
+        let updated = *entry;
+        drop(guard);
+        self.save();
+        updated
+    }
+
+    pub fn toggle_send_as_document(&self, user_id: UserId) -> UserSettings {
+        let mut guard = self.inner.lock().unwrap();
+        let entry = guard.entry(user_id.0).or_default();
+        entry.send_as_document = !entry.send_as_document;
         let updated = *entry;
         drop(guard);
         self.save();
@@ -139,22 +166,29 @@ mod tests {
             quality: QualityPreference::AutoBest,
             audio_only: false,
             ym_quality: YandexQualityPreference::Optimal,
+            send_as_document: false,
         });
 
         let updated = store.toggle_audio_only(uid);
         assert!(updated.audio_only);
         assert_eq!(store.get(uid).audio_only, true);
 
-        let updated_q = store.set_quality(uid, QualityPreference::AskEveryTime);
+        let updated_q = store.toggle_quality(uid);
         assert_eq!(updated_q.quality, QualityPreference::AskEveryTime);
+        assert_eq!(store.get(uid).quality, QualityPreference::AskEveryTime);
 
         let updated_ym = store.toggle_ym_quality(uid);
         assert_eq!(updated_ym.ym_quality, YandexQualityPreference::Lossless);
+
+        let updated_doc = store.toggle_send_as_document(uid);
+        assert!(updated_doc.send_as_document);
+        assert_eq!(store.get(uid).send_as_document, true);
 
         // Reload store from same file
         let reloaded = UserSettingsStore::load_or_create(tmp.path());
         assert_eq!(reloaded.get(uid).quality, QualityPreference::AskEveryTime);
         assert_eq!(reloaded.get(uid).audio_only, true);
         assert_eq!(reloaded.get(uid).ym_quality, YandexQualityPreference::Lossless);
+        assert_eq!(reloaded.get(uid).send_as_document, true);
     }
 }

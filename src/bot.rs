@@ -32,7 +32,7 @@ YouTube, TikTok, Instagram, SoundCloud, Яндекс Музыка, Pornhub, VK �
 • <b>Поиск на SoundCloud:</b> <code>/sc &lt;запрос&gt;</code>
 • <b>Поиск на Яндекс Музыке:</b> <code>/ym &lt;запрос&gt;</code> или название трека в ЛС
 • <b>Поиск на Pornhub:</b> <code>/ph &lt;запрос&gt;</code>
-• <b>Настройки:</b> <code>/settings</code> (разрешение видео, режим «только аудио», AAC/FLAC для Я.Музыки)
+• <b>Настройки:</b> <code>/settings</code> (разрешение видео, режим «только аудио», отправка файлом, AAC/FLAC для Я.Музыки)
 
 <i>Поддерживаются видео в высоком качестве (до 2 ГБ) без водяных знаков.</i>";
 
@@ -78,26 +78,31 @@ fn build_settings_text(settings: &UserSettings) -> String {
         crate::settings::YandexQualityPreference::Optimal => "AAC 192 kbps ⚡ <i>(быстро, ~10 МБ)</i>",
         crate::settings::YandexQualityPreference::Lossless => "FLAC 💎 <i>(lossless, ~70 МБ)</i>",
     };
+    let doc_desc = if settings.send_as_document {
+        "<b>Включена</b> <i>(без сжатия Telegram)</i>"
+    } else {
+        "Выключена <i>(как медиа: видео/музыка)</i>"
+    };
 
     format!(
         "⚙️ <b>Настройки загрузки</b>\n\n\
         🎬 <b>Качество видео:</b> {q_desc}\n\
         🎶 <b>Яндекс Музыка:</b> {ym_desc}\n\
-        🎵 <b>Только аудио:</b> {a_desc}\n\n\
-        <i>Выбери нужные параметры на кнопках ниже:</i>"
+        🎵 <b>Только аудио:</b> {a_desc}\n\
+        📎 <b>Отправка файлом:</b> {doc_desc}\n\n\
+        <i>Нажми на кнопку, чтобы переключить:</i>"
     )
 }
 
 fn build_settings_keyboard(settings: &UserSettings) -> InlineKeyboardMarkup {
-    let (auto_mark, manual_mark) = if settings.quality == QualityPreference::AutoBest {
-        ("✅ ", "🔘 ")
-    } else {
-        ("🔘 ", "✅ ")
+    let q_label = match settings.quality {
+        QualityPreference::AutoBest => "🎬 Качество видео: Авто ⚡",
+        QualityPreference::AskEveryTime => "🎬 Качество видео: Вручную ❓",
     };
 
-    let (ym_opt_mark, ym_loss_mark) = match settings.ym_quality {
-        crate::settings::YandexQualityPreference::Optimal => ("✅ ", "🔘 "),
-        crate::settings::YandexQualityPreference::Lossless => ("🔘 ", "✅ "),
+    let ym_label = match settings.ym_quality {
+        crate::settings::YandexQualityPreference::Optimal => "🎶 Я.Музыка: AAC 192k ⚡",
+        crate::settings::YandexQualityPreference::Lossless => "🎶 Я.Музыка: FLAC 💎",
     };
 
     let audio_label = if settings.audio_only {
@@ -106,35 +111,34 @@ fn build_settings_keyboard(settings: &UserSettings) -> InlineKeyboardMarkup {
         "🎵 Только аудио: ВЫКЛ ❌"
     };
 
+    let doc_label = if settings.send_as_document {
+        "📎 Отправка файлом: ВКЛ ✅"
+    } else {
+        "📎 Отправка файлом: ВЫКЛ ❌"
+    };
+
     InlineKeyboardMarkup::new(vec![
-        // Row 1: Video quality — two-column segmented control
-        vec![
-            InlineKeyboardButton::callback(
-                format!("{auto_mark}🎬 Авто (макс.)"),
-                "settings:q:auto",
-            ),
-            InlineKeyboardButton::callback(
-                format!("{manual_mark}🎬 Выбирать"),
-                "settings:q:manual",
-            ),
-        ],
-        // Row 2: Yandex Music quality — two-column segmented control
-        vec![
-            InlineKeyboardButton::callback(
-                format!("{ym_opt_mark}⚡ AAC"),
-                "settings:ym:optimal",
-            ),
-            InlineKeyboardButton::callback(
-                format!("{ym_loss_mark}💎 FLAC"),
-                "settings:ym:lossless",
-            ),
-        ],
+        // Row 1: Video quality toggle — full width
+        vec![InlineKeyboardButton::callback(
+            q_label,
+            "settings:toggle:quality",
+        )],
+        // Row 2: Yandex Music quality toggle — full width
+        vec![InlineKeyboardButton::callback(
+            ym_label,
+            "settings:toggle:ym_quality",
+        )],
         // Row 3: Audio-only toggle — full width
         vec![InlineKeyboardButton::callback(
             audio_label,
             "settings:toggle:audio",
         )],
-        // Row 4: Close button — full width
+        // Row 4: Document toggle — full width
+        vec![InlineKeyboardButton::callback(
+            doc_label,
+            "settings:toggle:document",
+        )],
+        // Row 5: Close button — full width
         vec![InlineKeyboardButton::callback(
             "✖️ Закрыть",
             "settings:close",
@@ -424,6 +428,7 @@ pub async fn process_and_send_media(
     audio_only: bool,
     max_height: Option<u16>,
     ym_quality: crate::settings::YandexQualityPreference,
+    send_as_document: bool,
     config: &Arc<Config>,
     queue: &QueueManager,
     cache: &MediaCache,
@@ -439,27 +444,48 @@ pub async fn process_and_send_media(
     };
 
     // 1. Fast path: check Telegram file_id cache (0.1s instant response, bypasses queue)
-    if let Some(cached) = cache.get(url, audio_only, effective_cache_height) {
+    if let Some(cached) = cache.get(url, audio_only, effective_cache_height, send_as_document) {
         match cached {
             CachedMedia::Video(file_id) => {
                 let url_id = cache.register_url(url);
-                let mut req = bot
-                    .send_video(chat_id, InputFile::file_id(file_id))
-                    .supports_streaming(true)
-                    .reply_markup(build_audio_button(url_id));
-                if let Some(msg_id) = reply_to {
-                    req = req.reply_parameters(ReplyParameters::new(msg_id));
-                }
-                req.await?;
-                return Ok(());
-            }
-            CachedMedia::Audio(file_ids) => {
-                for file_id in file_ids {
-                    let mut req = bot.send_audio(chat_id, InputFile::file_id(file_id));
+                if send_as_document {
+                    let mut req = bot
+                        .send_document(chat_id, InputFile::file_id(file_id))
+                        .disable_content_type_detection(true)
+                        .reply_markup(build_audio_button(url_id));
                     if let Some(msg_id) = reply_to {
                         req = req.reply_parameters(ReplyParameters::new(msg_id));
                     }
                     req.await?;
+                } else {
+                    let mut req = bot
+                        .send_video(chat_id, InputFile::file_id(file_id))
+                        .supports_streaming(true)
+                        .reply_markup(build_audio_button(url_id));
+                    if let Some(msg_id) = reply_to {
+                        req = req.reply_parameters(ReplyParameters::new(msg_id));
+                    }
+                    req.await?;
+                }
+                return Ok(());
+            }
+            CachedMedia::Audio(file_ids) => {
+                for file_id in file_ids {
+                    if send_as_document {
+                        let mut req = bot
+                            .send_document(chat_id, InputFile::file_id(file_id))
+                            .disable_content_type_detection(true);
+                        if let Some(msg_id) = reply_to {
+                            req = req.reply_parameters(ReplyParameters::new(msg_id));
+                        }
+                        req.await?;
+                    } else {
+                        let mut req = bot.send_audio(chat_id, InputFile::file_id(file_id));
+                        if let Some(msg_id) = reply_to {
+                            req = req.reply_parameters(ReplyParameters::new(msg_id));
+                        }
+                        req.await?;
+                    }
                 }
                 return Ok(());
             }
@@ -639,31 +665,67 @@ pub async fn process_and_send_media(
                         .await;
                 }
 
-                let input_file = InputFile::file(&track.path);
-                let mut request = bot.send_audio(chat_id, input_file);
+                if send_as_document {
+                    let mut input_file = InputFile::file(&track.path);
+                    let ext = track.path.extension().and_then(|s| s.to_str()).unwrap_or("mp3");
+                    let custom_name = match (&track.performer, &track.title) {
+                        (Some(p), Some(t)) => Some(format!("{p} - {t}.{ext}")),
+                        (None, Some(t)) => Some(format!("{t}.{ext}")),
+                        _ => None,
+                    };
+                    if let Some(name) = custom_name {
+                        input_file = input_file.file_name(name);
+                    }
 
-                if let Some(msg_id) = reply_to {
-                    request = request.reply_parameters(ReplyParameters::new(msg_id));
-                }
-                if let Some(p) = &track.performer {
-                    request = request.performer(p);
-                }
-                if let Some(t) = &track.title {
-                    request = request.title(t);
-                }
-                if let Some(cover_path) = &track.cover_path {
-                    request = request.thumbnail(InputFile::file(cover_path));
-                }
+                    let mut request = bot
+                        .send_document(chat_id, input_file)
+                        .disable_content_type_detection(true);
 
-                match request.await {
-                    Ok(sent_msg) => {
-                        if let Some(audio) = sent_msg.audio() {
-                            total_size = total_size.saturating_add(u64::from(audio.file.size));
-                            uploaded_ids.push(audio.file.id.clone());
+                    if let Some(msg_id) = reply_to {
+                        request = request.reply_parameters(ReplyParameters::new(msg_id));
+                    }
+                    if let Some(cover_path) = &track.cover_path {
+                        request = request.thumbnail(InputFile::file(cover_path));
+                    }
+
+                    match request.await {
+                        Ok(sent_msg) => {
+                            if let Some(doc) = sent_msg.document() {
+                                total_size = total_size.saturating_add(u64::from(doc.file.size));
+                                uploaded_ids.push(doc.file.id.clone());
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("Failed to send audio document {:?}: {:?}", track.path, e);
                         }
                     }
-                    Err(e) => {
-                        log::error!("Failed to send audio {:?}: {:?}", track.path, e);
+                } else {
+                    let input_file = InputFile::file(&track.path);
+                    let mut request = bot.send_audio(chat_id, input_file);
+
+                    if let Some(msg_id) = reply_to {
+                        request = request.reply_parameters(ReplyParameters::new(msg_id));
+                    }
+                    if let Some(p) = &track.performer {
+                        request = request.performer(p);
+                    }
+                    if let Some(t) = &track.title {
+                        request = request.title(t);
+                    }
+                    if let Some(cover_path) = &track.cover_path {
+                        request = request.thumbnail(InputFile::file(cover_path));
+                    }
+
+                    match request.await {
+                        Ok(sent_msg) => {
+                            if let Some(audio) = sent_msg.audio() {
+                                total_size = total_size.saturating_add(u64::from(audio.file.size));
+                                uploaded_ids.push(audio.file.id.clone());
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("Failed to send audio {:?}: {:?}", track.path, e);
+                        }
                     }
                 }
             }
@@ -681,7 +743,7 @@ pub async fn process_and_send_media(
                 .await;
 
             if !uploaded_ids.is_empty() {
-                cache.insert(url, true, effective_cache_height, CachedMedia::Audio(uploaded_ids), total_size);
+                cache.insert(url, true, effective_cache_height, send_as_document, CachedMedia::Audio(uploaded_ids), total_size);
             }
 
             let _ = bot.delete_message(chat_id, status_msg.id).await;
@@ -731,31 +793,55 @@ pub async fn process_and_send_media(
             });
 
             let url_id = cache.register_url(url);
-            let video_dims = get_video_dimensions(&file_path).await;
-            let input_file = InputFile::file(&file_path);
-            let mut request = bot
-                .send_video(chat_id, input_file)
-                .supports_streaming(true)
-                .reply_markup(build_audio_button(url_id));
+            let send_res = if send_as_document {
+                let mut request = bot
+                    .send_document(chat_id, InputFile::file(&file_path))
+                    .disable_content_type_detection(true)
+                    .reply_markup(build_audio_button(url_id));
 
-            if let Some((w, h)) = video_dims {
-                request = request.width(w).height(h);
-            }
+                if let Some(msg_id) = reply_to {
+                    request = request.reply_parameters(ReplyParameters::new(msg_id));
+                }
+                request.await
+            } else {
+                let video_dims = get_video_dimensions(&file_path).await;
+                let input_file = InputFile::file(&file_path);
+                let mut request = bot
+                    .send_video(chat_id, input_file)
+                    .supports_streaming(true)
+                    .reply_markup(build_audio_button(url_id));
 
-            if let Some(msg_id) = reply_to {
-                request = request.reply_parameters(ReplyParameters::new(msg_id));
-            }
+                if let Some((w, h)) = video_dims {
+                    request = request.width(w).height(h);
+                }
 
-            let send_res = request.await;
+                if let Some(msg_id) = reply_to {
+                    request = request.reply_parameters(ReplyParameters::new(msg_id));
+                }
+                request.await
+            };
+
             ul_updater.abort();
 
             match send_res {
                 Ok(sent_msg) => {
-                    if let Some(video) = sent_msg.video() {
+                    if send_as_document {
+                        if let Some(doc) = sent_msg.document() {
+                            cache.insert(
+                                url,
+                                false,
+                                max_height,
+                                send_as_document,
+                                CachedMedia::Video(doc.file.id.clone()),
+                                u64::from(doc.file.size),
+                            );
+                        }
+                    } else if let Some(video) = sent_msg.video() {
                         cache.insert(
                             url,
                             false,
                             max_height,
+                            send_as_document,
                             CachedMedia::Video(video.file.id.clone()),
                             u64::from(video.file.size),
                         );
@@ -802,23 +888,48 @@ pub async fn process_and_send_media(
                                     format_progress_bar("📤 Отправка", 50),
                                 )
                                 .await;
-                            let smaller_dims = get_video_dimensions(&smaller_path).await;
-                            let mut retry_req = bot
-                                .send_video(chat_id, InputFile::file(&smaller_path))
-                                .supports_streaming(true)
-                                .reply_markup(build_audio_button(url_id));
-                            if let Some((w, h)) = smaller_dims {
-                                retry_req = retry_req.width(w).height(h);
-                            }
-                            if let Some(msg_id) = reply_to {
-                                retry_req = retry_req.reply_parameters(ReplyParameters::new(msg_id));
-                            }
-                            if let Ok(sent_msg) = retry_req.await {
-                                if let Some(video) = sent_msg.video() {
+                            let retry_res = if send_as_document {
+                                let mut retry_req = bot
+                                    .send_document(chat_id, InputFile::file(&smaller_path))
+                                    .disable_content_type_detection(true)
+                                    .reply_markup(build_audio_button(url_id));
+                                if let Some(msg_id) = reply_to {
+                                    retry_req = retry_req.reply_parameters(ReplyParameters::new(msg_id));
+                                }
+                                retry_req.await
+                            } else {
+                                let smaller_dims = get_video_dimensions(&smaller_path).await;
+                                let mut retry_req = bot
+                                    .send_video(chat_id, InputFile::file(&smaller_path))
+                                    .supports_streaming(true)
+                                    .reply_markup(build_audio_button(url_id));
+                                if let Some((w, h)) = smaller_dims {
+                                    retry_req = retry_req.width(w).height(h);
+                                }
+                                if let Some(msg_id) = reply_to {
+                                    retry_req = retry_req.reply_parameters(ReplyParameters::new(msg_id));
+                                }
+                                retry_req.await
+                            };
+
+                            if let Ok(sent_msg) = retry_res {
+                                if send_as_document {
+                                    if let Some(doc) = sent_msg.document() {
+                                        cache.insert(
+                                            url,
+                                            false,
+                                            max_height,
+                                            send_as_document,
+                                            CachedMedia::Video(doc.file.id.clone()),
+                                            u64::from(doc.file.size),
+                                        );
+                                    }
+                                } else if let Some(video) = sent_msg.video() {
                                     cache.insert(
                                         url,
                                         false,
                                         max_height,
+                                        send_as_document,
                                         CachedMedia::Video(video.file.id.clone()),
                                         u64::from(video.file.size),
                                     );
@@ -902,6 +1013,7 @@ async fn handle_yandex_search(
                 true,
                 None,
                 user_settings.ym_quality,
+                user_settings.send_as_document,
                 config,
                 queue,
                 cache,
@@ -976,6 +1088,7 @@ async fn handle_soundcloud_search(
                 true,
                 None,
                 user_settings.ym_quality,
+                user_settings.send_as_document,
                 config,
                 queue,
                 cache,
@@ -1203,6 +1316,7 @@ pub async fn handle_message(
                     audio_only,
                     None,
                     user_settings.ym_quality,
+                    user_settings.send_as_document,
                     &config,
                     &queue,
                     &cache,
@@ -1259,20 +1373,22 @@ pub async fn handle_callback(
 
         let user_id = q.from.id;
         let updated = match sub {
-            "q:auto" => settings.set_quality(user_id, QualityPreference::AutoBest),
-            "q:manual" => settings.set_quality(user_id, QualityPreference::AskEveryTime),
-            "ym:optimal" => settings.set_ym_quality(user_id, crate::settings::YandexQualityPreference::Optimal),
-            "ym:lossless" => settings.set_ym_quality(user_id, crate::settings::YandexQualityPreference::Lossless),
+            "toggle:quality" | "q:auto" | "q:manual" => settings.toggle_quality(user_id),
+            "toggle:ym_quality" | "ym:optimal" | "ym:lossless" => settings.toggle_ym_quality(user_id),
             "toggle:audio" => settings.toggle_audio_only(user_id),
-            "toggle:ym_quality" => settings.toggle_ym_quality(user_id),
+            "toggle:document" => settings.toggle_send_as_document(user_id),
             _ => settings.get(user_id),
         };
 
         let alert_text = match sub {
-            "q:auto" => "Качество видео: Авто (максимальное)",
-            "q:manual" => "Качество видео: Вручную перед скачиванием",
-            "ym:optimal" => "Яндекс Музыка: AAC 192 kbps ⚡ (быстро)",
-            "ym:lossless" => "Яндекс Музыка: FLAC 💎 (lossless)",
+            "toggle:quality" | "q:auto" | "q:manual" => match updated.quality {
+                QualityPreference::AutoBest => "Качество видео: Авто (максимальное)",
+                QualityPreference::AskEveryTime => "Качество видео: Вручную перед скачиванием",
+            },
+            "toggle:ym_quality" | "ym:optimal" | "ym:lossless" => match updated.ym_quality {
+                crate::settings::YandexQualityPreference::Optimal => "Яндекс Музыка: AAC 192 kbps ⚡ (быстро)",
+                crate::settings::YandexQualityPreference::Lossless => "Яндекс Музыка: FLAC 💎 (lossless)",
+            },
             "toggle:audio" => {
                 if updated.audio_only {
                     "Режим «Только аудио» ВКЛЮЧЁН"
@@ -1280,10 +1396,13 @@ pub async fn handle_callback(
                     "Режим «Только аудио» ВЫКЛЮЧЕН"
                 }
             }
-            "toggle:ym_quality" => match updated.ym_quality {
-                crate::settings::YandexQualityPreference::Optimal => "Яндекс Музыка: AAC 192k ⚡ (Быстро)",
-                crate::settings::YandexQualityPreference::Lossless => "Яндекс Музыка: FLAC 💎 (Lossless)",
-            },
+            "toggle:document" => {
+                if updated.send_as_document {
+                    "Отправка файлом (без сжатия) ВКЛЮЧЕНА"
+                } else {
+                    "Отправка файлом ВЫКЛЮЧЕНА"
+                }
+            }
             _ => "Настройки обновлены",
         };
 
@@ -1333,6 +1452,7 @@ pub async fn handle_callback(
                 true,
                 None,
                 user_settings.ym_quality,
+                user_settings.send_as_document,
                 &config,
                 &queue,
                 &cache,
@@ -1385,6 +1505,7 @@ pub async fn handle_callback(
                     false,
                     Some(height),
                     user_settings.ym_quality,
+                    user_settings.send_as_document,
                     &config,
                     &queue,
                     &cache,
@@ -1472,6 +1593,7 @@ pub async fn handle_callback(
                     true,
                     None,
                     user_settings.ym_quality,
+                    user_settings.send_as_document,
                     &config,
                     &queue,
                     &cache,
@@ -1501,6 +1623,7 @@ pub async fn handle_callback(
                     false,
                     None,
                     user_settings.ym_quality,
+                    user_settings.send_as_document,
                     &config,
                     &queue,
                     &cache,
@@ -1590,6 +1713,7 @@ pub async fn handle_callback(
                 true,
                 None,
                 user_settings.ym_quality,
+                user_settings.send_as_document,
                 &config,
                 &queue,
                 &cache,
@@ -1675,6 +1799,7 @@ pub async fn handle_callback(
                     true,
                     None,
                     user_settings.ym_quality,
+                    user_settings.send_as_document,
                     &config,
                     &queue,
                     &cache,
@@ -1704,6 +1829,7 @@ pub async fn handle_callback(
                     false,
                     None,
                     user_settings.ym_quality,
+                    user_settings.send_as_document,
                     &config,
                     &queue,
                     &cache,
@@ -1794,6 +1920,7 @@ pub async fn handle_callback(
                                 true,
                                 None,
                                 user_settings.ym_quality,
+                                user_settings.send_as_document,
                                 &config,
                                 &queue,
                                 &cache,
@@ -1961,35 +2088,41 @@ mod tests {
     fn test_build_settings_keyboard_and_text() {
         let mut settings = UserSettings::default();
         let kb = build_settings_keyboard(&settings);
-        // 4 rows: Video (2 cols), YM (2 cols), Audio toggle (1 col), Close (1 col)
-        assert_eq!(kb.inline_keyboard.len(), 4);
-        assert_eq!(kb.inline_keyboard[0].len(), 2);
-        assert_eq!(kb.inline_keyboard[0][0].text, "✅ 🎬 Авто (макс.)");
-        assert_eq!(kb.inline_keyboard[0][1].text, "🔘 🎬 Выбирать");
+        // 5 rows: Video (1 col), YM (1 col), Audio toggle (1 col), Document toggle (1 col), Close (1 col)
+        assert_eq!(kb.inline_keyboard.len(), 5);
+        assert_eq!(kb.inline_keyboard[0].len(), 1);
+        assert_eq!(kb.inline_keyboard[0][0].text, "🎬 Качество видео: Авто ⚡");
 
-        assert_eq!(kb.inline_keyboard[1].len(), 2);
-        assert_eq!(kb.inline_keyboard[1][0].text, "✅ ⚡ AAC");
-        assert_eq!(kb.inline_keyboard[1][1].text, "🔘 💎 FLAC");
+        assert_eq!(kb.inline_keyboard[1].len(), 1);
+        assert_eq!(kb.inline_keyboard[1][0].text, "🎶 Я.Музыка: AAC 192k ⚡");
 
         assert_eq!(kb.inline_keyboard[2].len(), 1);
         assert_eq!(kb.inline_keyboard[2][0].text, "🎵 Только аудио: ВЫКЛ ❌");
 
         assert_eq!(kb.inline_keyboard[3].len(), 1);
-        assert_eq!(kb.inline_keyboard[3][0].text, "✖️ Закрыть");
+        assert_eq!(kb.inline_keyboard[3][0].text, "📎 Отправка файлом: ВЫКЛ ❌");
+
+        assert_eq!(kb.inline_keyboard[4].len(), 1);
+        assert_eq!(kb.inline_keyboard[4][0].text, "✖️ Закрыть");
 
         settings.quality = QualityPreference::AskEveryTime;
         settings.ym_quality = crate::settings::YandexQualityPreference::Lossless;
         settings.audio_only = true;
+        settings.send_as_document = true;
         let kb_custom = build_settings_keyboard(&settings);
-        assert_eq!(kb_custom.inline_keyboard[0][0].text, "🔘 🎬 Авто (макс.)");
-        assert_eq!(kb_custom.inline_keyboard[0][1].text, "✅ 🎬 Выбирать");
-        assert_eq!(kb_custom.inline_keyboard[1][0].text, "🔘 ⚡ AAC");
-        assert_eq!(kb_custom.inline_keyboard[1][1].text, "✅ 💎 FLAC");
+        assert_eq!(kb_custom.inline_keyboard[0].len(), 1);
+        assert_eq!(kb_custom.inline_keyboard[0][0].text, "🎬 Качество видео: Вручную ❓");
+        assert_eq!(kb_custom.inline_keyboard[1].len(), 1);
+        assert_eq!(kb_custom.inline_keyboard[1][0].text, "🎶 Я.Музыка: FLAC 💎");
+        assert_eq!(kb_custom.inline_keyboard[2].len(), 1);
         assert_eq!(kb_custom.inline_keyboard[2][0].text, "🎵 Только аудио: ВКЛ ✅");
+        assert_eq!(kb_custom.inline_keyboard[3].len(), 1);
+        assert_eq!(kb_custom.inline_keyboard[3][0].text, "📎 Отправка файлом: ВКЛ ✅");
 
         let text = build_settings_text(&settings);
         assert!(text.contains("Вручную"));
         assert!(text.contains("FLAC"));
         assert!(text.contains("Включён"));
+        assert!(text.contains("Включена"));
     }
 }

@@ -32,6 +32,8 @@ struct PersistedMediaItem {
     url: String,
     audio_only: bool,
     max_height: Option<u16>,
+    #[serde(default)]
+    send_as_document: bool,
     media: CachedMedia,
     size_bytes: u64,
 }
@@ -60,8 +62,8 @@ pub struct MediaCache {
 
 #[derive(Default)]
 struct CacheState {
-    media: HashMap<(String, bool, Option<u16>), CacheEntry>,
-    media_order: VecDeque<(String, bool, Option<u16>)>,
+    media: HashMap<(String, bool, Option<u16>, bool), CacheEntry>,
+    media_order: VecDeque<(String, bool, Option<u16>, bool)>,
     total_bytes: u64,
     url_to_id: HashMap<String, u64>,
     id_to_url: HashMap<u64, String>,
@@ -77,6 +79,7 @@ struct CacheState {
 }
 
 impl MediaCache {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(CacheState::default())),
@@ -97,7 +100,7 @@ impl MediaCache {
                     Ok(persisted) => {
                         next_id = persisted.next_id.max(1);
                         for item in persisted.media_items {
-                            let key = (item.url, item.audio_only, item.max_height);
+                            let key = (item.url, item.audio_only, item.max_height, item.send_as_document);
                             state.total_bytes = state.total_bytes.saturating_add(item.size_bytes);
                             state.media_order.push_back(key.clone());
                             state.media.insert(
@@ -161,6 +164,7 @@ impl MediaCache {
                     url: key.0.clone(),
                     audio_only: key.1,
                     max_height: key.2,
+                    send_as_document: key.3,
                     media: entry.media.clone(),
                     size_bytes: entry.size_bytes,
                 })
@@ -197,27 +201,28 @@ impl MediaCache {
         }
     }
 
-    /// Retrieves cached Telegram `FileId`(s) for the given URL, mode (`audio_only`), and resolution (`max_height`).
-    pub fn get(&self, url: &str, audio_only: bool, max_height: Option<u16>) -> Option<CachedMedia> {
+    /// Retrieves cached Telegram `FileId`(s) for the given URL, mode (`audio_only`), resolution (`max_height`), and format (`send_as_document`).
+    pub fn get(&self, url: &str, audio_only: bool, max_height: Option<u16>, send_as_document: bool) -> Option<CachedMedia> {
         let state = self.inner.lock().ok()?;
         state
             .media
-            .get(&(url.to_string(), audio_only, max_height))
+            .get(&(url.to_string(), audio_only, max_height, send_as_document))
             .map(|entry| entry.media.clone())
     }
 
-    /// Stores Telegram `FileId`(s) for the given URL, mode (`audio_only`), and resolution (`max_height`),
+    /// Stores Telegram `FileId`(s) for the given URL, mode (`audio_only`), resolution (`max_height`), and format (`send_as_document`),
     /// evicting the earliest entries once the 5 GB or entry limit is reached.
     pub fn insert(
         &self,
         url: &str,
         audio_only: bool,
         max_height: Option<u16>,
+        send_as_document: bool,
         media: CachedMedia,
         size_bytes: u64,
     ) {
         if let Ok(mut state) = self.inner.lock() {
-            let key = (url.to_string(), audio_only, max_height);
+            let key = (url.to_string(), audio_only, max_height, send_as_document);
 
             if let Some(old) = state.media.remove(&key) {
                 state.total_bytes = state.total_bytes.saturating_sub(old.size_bytes);
@@ -387,6 +392,7 @@ mod tests {
             url,
             false,
             Some(720),
+            false,
             CachedMedia::Video(FileId::from("test_file_id_720")),
             10_000_000,
         );
@@ -394,9 +400,10 @@ mod tests {
         let reloaded = MediaCache::load_or_create(tmp.path());
         assert_eq!(reloaded.resolve_url(url_id).as_deref(), Some(url));
         assert_eq!(
-            reloaded.get(url, false, Some(720)),
+            reloaded.get(url, false, Some(720), false),
             Some(CachedMedia::Video(FileId::from("test_file_id_720")))
         );
+        assert_eq!(reloaded.get(url, false, Some(720), true), None);
 
         // Next registered URL gets a new non-colliding ID
         let url2_id = reloaded.register_url("https://soundcloud.com/artist/track");

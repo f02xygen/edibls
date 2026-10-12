@@ -52,6 +52,7 @@ jobs:
             cd ${{ secrets.SERVER_APP_DIR || '~/edibls' }}
             GIT_TERMINAL_PROMPT=0 git pull https://github.com/f02xygen/edibls.git main
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            export EDIBLS_IMAGE=ghcr.io/f02xygen/edibls:latest
             docker compose pull edibls
             docker compose up -d --no-build edibls
 

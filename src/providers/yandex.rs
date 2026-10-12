@@ -4,14 +4,14 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::config::Config;
 
 const YANDEX_API_SEARCH_URL: &str = "https://api.music.yandex.net/search";
-const MAX_SEARCH_RESULTS: usize = 8;
+const MAX_SEARCH_RESULTS: usize = 30;
 
 /// Metadata for a single Yandex Music track returned from search.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,15 +103,22 @@ pub fn is_yandex_music_url(url: &str) -> bool {
     url.contains("music.yandex.") || url.contains("yandex.ru/music")
 }
 
+fn ym_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_default()
+    })
+}
+
 /// Searches Yandex Music tracks by query, applying artist-aware filtering and compilation deduplication.
 pub async fn search_yandex_tracks(
     query: &str,
     token: Option<&str>,
 ) -> Result<Vec<YandexTrackInfo>> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .context("Failed to build HTTP client for Yandex Music search")?;
+    let client = ym_http_client();
 
     let mut req = client
         .get(YANDEX_API_SEARCH_URL)
@@ -119,6 +126,7 @@ pub async fn search_yandex_tracks(
             ("text", query),
             ("type", "track"),
             ("page", "0"),
+            ("pageSize", "30"),
             ("nocorrect", "false"),
         ])
         .header("X-Yandex-Music-Client", "YandexMusicAndroid/24023621")

@@ -1,8 +1,10 @@
 /target
-# Environment & Secrets
+# Environment & Secrets & Local State
 .env
 *.env
 cookies.txt
+settings.json
+cache.json
 
 # Virtual environments
 venv/

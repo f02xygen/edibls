@@ -115,8 +115,71 @@ fn build_settings_keyboard(settings: &UserSettings) -> InlineKeyboardMarkup {
     ])
 }
 
-fn build_track_selection_keyboard(tracks: &[YandexTrackInfo]) -> InlineKeyboardMarkup {
-    let mut rows: Vec<Vec<InlineKeyboardButton>> = tracks
+pub const SEARCH_PAGE_SIZE: usize = 5;
+
+fn format_ph_search_text(query: &str, page: usize, total_pages: usize) -> String {
+    if total_pages > 1 {
+        format!(
+            "Результаты поиска на Pornhub по запросу «{query}» (стр. {}/{}):",
+            page + 1,
+            total_pages
+        )
+    } else {
+        format!("Результаты поиска на Pornhub по запросу «{query}»:")
+    }
+}
+
+fn format_ym_search_text(query: &str, page: usize, total_pages: usize) -> String {
+    if total_pages > 1 {
+        format!(
+            "Найдено несколько треков по запросу «{query}» (стр. {}/{}). Выбери нужный:",
+            page + 1,
+            total_pages
+        )
+    } else {
+        format!("Найдено несколько треков по запросу «{query}». Выбери нужный:")
+    }
+}
+
+fn format_yt_search_text(query: &str, page: usize, total_pages: usize) -> String {
+    if total_pages > 1 {
+        format!(
+            "Результаты поиска на YouTube по запросу «{query}» (стр. {}/{}):",
+            page + 1,
+            total_pages
+        )
+    } else {
+        format!("Результаты поиска на YouTube по запросу «{query}»:")
+    }
+}
+
+fn format_sc_search_text(query: &str, page: usize, total_pages: usize) -> String {
+    if total_pages > 1 {
+        format!(
+            "Результаты поиска на SoundCloud по запросу «{query}» (стр. {}/{}):",
+            page + 1,
+            total_pages
+        )
+    } else {
+        format!("Результаты поиска на SoundCloud по запросу «{query}»:")
+    }
+}
+
+fn build_track_selection_keyboard(
+    search_id: u64,
+    tracks: &[YandexTrackInfo],
+    page: usize,
+) -> InlineKeyboardMarkup {
+    let total_tracks = tracks.len();
+    let total_pages = (total_tracks + SEARCH_PAGE_SIZE - 1) / SEARCH_PAGE_SIZE;
+    let total_pages = total_pages.max(1);
+    let page = page.min(total_pages.saturating_sub(1));
+
+    let start_idx = page * SEARCH_PAGE_SIZE;
+    let end_idx = (start_idx + SEARCH_PAGE_SIZE).min(total_tracks);
+    let page_tracks = &tracks[start_idx..end_idx];
+
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = page_tracks
         .iter()
         .map(|track| {
             vec![InlineKeyboardButton::callback(
@@ -126,6 +189,29 @@ fn build_track_selection_keyboard(tracks: &[YandexTrackInfo]) -> InlineKeyboardM
         })
         .collect();
 
+    if total_pages > 1 {
+        let mut nav_row = Vec::with_capacity(3);
+        if page > 0 {
+            nav_row.push(InlineKeyboardButton::callback(
+                "⬅️ Назад",
+                format!("ym:p:{search_id}:{}", page - 1),
+            ));
+        }
+
+        nav_row.push(InlineKeyboardButton::callback(
+            format!("{}/{}", page + 1, total_pages),
+            format!("ym:noop:{search_id}:{page}"),
+        ));
+
+        if page + 1 < total_pages {
+            nav_row.push(InlineKeyboardButton::callback(
+                "Вперёд ➡️",
+                format!("ym:p:{search_id}:{}", page + 1),
+            ));
+        }
+        rows.push(nav_row);
+    }
+
     rows.push(vec![InlineKeyboardButton::callback(
         "❌ Отмена",
         "ym:cancel",
@@ -134,8 +220,21 @@ fn build_track_selection_keyboard(tracks: &[YandexTrackInfo]) -> InlineKeyboardM
     InlineKeyboardMarkup::new(rows)
 }
 
-fn build_ph_selection_keyboard(videos: &[PornhubVideoInfo]) -> InlineKeyboardMarkup {
-    let mut rows: Vec<Vec<InlineKeyboardButton>> = videos
+fn build_ph_selection_keyboard(
+    search_id: u64,
+    videos: &[PornhubVideoInfo],
+    page: usize,
+) -> InlineKeyboardMarkup {
+    let total_videos = videos.len();
+    let total_pages = (total_videos + SEARCH_PAGE_SIZE - 1) / SEARCH_PAGE_SIZE;
+    let total_pages = total_pages.max(1);
+    let page = page.min(total_pages.saturating_sub(1));
+
+    let start_idx = page * SEARCH_PAGE_SIZE;
+    let end_idx = (start_idx + SEARCH_PAGE_SIZE).min(total_videos);
+    let page_videos = &videos[start_idx..end_idx];
+
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = page_videos
         .iter()
         .map(|video| {
             vec![InlineKeyboardButton::callback(
@@ -145,6 +244,29 @@ fn build_ph_selection_keyboard(videos: &[PornhubVideoInfo]) -> InlineKeyboardMar
         })
         .collect();
 
+    if total_pages > 1 {
+        let mut nav_row = Vec::with_capacity(3);
+        if page > 0 {
+            nav_row.push(InlineKeyboardButton::callback(
+                "⬅️ Назад",
+                format!("ph:p:{search_id}:{}", page - 1),
+            ));
+        }
+
+        nav_row.push(InlineKeyboardButton::callback(
+            format!("{}/{}", page + 1, total_pages),
+            format!("ph:noop:{search_id}:{page}"),
+        ));
+
+        if page + 1 < total_pages {
+            nav_row.push(InlineKeyboardButton::callback(
+                "Вперёд ➡️",
+                format!("ph:p:{search_id}:{}", page + 1),
+            ));
+        }
+        rows.push(nav_row);
+    }
+
     rows.push(vec![InlineKeyboardButton::callback(
         "❌ Отмена",
         "ph:cancel",
@@ -153,41 +275,113 @@ fn build_ph_selection_keyboard(videos: &[PornhubVideoInfo]) -> InlineKeyboardMar
     InlineKeyboardMarkup::new(rows)
 }
 
-fn build_sc_selection_keyboard(tracks: &[SoundcloudTrackInfo], cache: &MediaCache) -> InlineKeyboardMarkup {
-    let mut rows: Vec<Vec<InlineKeyboardButton>> = tracks
+fn build_yt_selection_keyboard(
+    search_id: u64,
+    videos: &[YouTubeVideoInfo],
+    page: usize,
+) -> InlineKeyboardMarkup {
+    let total_videos = videos.len();
+    let total_pages = (total_videos + SEARCH_PAGE_SIZE - 1) / SEARCH_PAGE_SIZE;
+    let total_pages = total_pages.max(1);
+    let page = page.min(total_pages.saturating_sub(1));
+
+    let start_idx = page * SEARCH_PAGE_SIZE;
+    let end_idx = (start_idx + SEARCH_PAGE_SIZE).min(total_videos);
+    let page_videos = &videos[start_idx..end_idx];
+
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = page_videos
         .iter()
-        .map(|track| {
-            let url_id = cache.register_url(&track.url);
+        .map(|video| {
             vec![InlineKeyboardButton::callback(
-                track.button_label(),
-                format!("sc:{url_id}"),
+                video.button_label(),
+                format!("yt:{}", video.id),
             )]
         })
         .collect();
 
+    if total_pages > 1 {
+        let mut nav_row = Vec::with_capacity(3);
+        if page > 0 {
+            nav_row.push(InlineKeyboardButton::callback(
+                "⬅️ Назад",
+                format!("yt:p:{search_id}:{}", page - 1),
+            ));
+        }
+
+        nav_row.push(InlineKeyboardButton::callback(
+            format!("{}/{}", page + 1, total_pages),
+            format!("yt:noop:{search_id}:{page}"),
+        ));
+
+        if page + 1 < total_pages {
+            nav_row.push(InlineKeyboardButton::callback(
+                "Вперёд ➡️",
+                format!("yt:p:{search_id}:{}", page + 1),
+            ));
+        }
+        rows.push(nav_row);
+    }
+
     rows.push(vec![InlineKeyboardButton::callback(
         "❌ Отмена",
-        "sc:cancel",
+        "yt:cancel",
     )]);
 
     InlineKeyboardMarkup::new(rows)
 }
 
-fn build_yt_selection_keyboard(videos: &[YouTubeVideoInfo], cache: &MediaCache) -> InlineKeyboardMarkup {
-    let mut rows: Vec<Vec<InlineKeyboardButton>> = videos
+fn build_sc_selection_keyboard(
+    search_id: u64,
+    tracks: &[SoundcloudTrackInfo],
+    page: usize,
+) -> InlineKeyboardMarkup {
+    let total_tracks = tracks.len();
+    let total_pages = (total_tracks + SEARCH_PAGE_SIZE - 1) / SEARCH_PAGE_SIZE;
+    let total_pages = total_pages.max(1);
+    let page = page.min(total_pages.saturating_sub(1));
+
+    let start_idx = page * SEARCH_PAGE_SIZE;
+    let end_idx = (start_idx + SEARCH_PAGE_SIZE).min(total_tracks);
+    let page_tracks = &tracks[start_idx..end_idx];
+
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = page_tracks
         .iter()
-        .map(|video| {
-            let url_id = cache.register_url(&video.url);
+        .enumerate()
+        .map(|(offset, track)| {
+            let item_idx = start_idx + offset;
             vec![InlineKeyboardButton::callback(
-                video.button_label(),
-                format!("yt:{url_id}"),
+                track.button_label(),
+                format!("sc:{search_id}:{item_idx}"),
             )]
         })
         .collect();
 
+    if total_pages > 1 {
+        let mut nav_row = Vec::with_capacity(3);
+        if page > 0 {
+            nav_row.push(InlineKeyboardButton::callback(
+                "⬅️ Назад",
+                format!("sc:p:{search_id}:{}", page - 1),
+            ));
+        }
+
+        nav_row.push(InlineKeyboardButton::callback(
+            format!("{}/{}", page + 1, total_pages),
+            format!("sc:noop:{search_id}:{page}"),
+        ));
+
+        if page + 1 < total_pages {
+            nav_row.push(InlineKeyboardButton::callback(
+                "Вперёд ➡️",
+                format!("sc:p:{search_id}:{}", page + 1),
+            ));
+        }
+        rows.push(nav_row);
+    }
+
     rows.push(vec![InlineKeyboardButton::callback(
         "❌ Отмена",
-        "yt:cancel",
+        "sc:cancel",
     )]);
 
     InlineKeyboardMarkup::new(rows)
@@ -633,12 +827,15 @@ async fn handle_yandex_search(
             .await?;
         }
         Ok(tracks) => {
+            let total_pages = (tracks.len() + SEARCH_PAGE_SIZE - 1) / SEARCH_PAGE_SIZE;
+            let total_pages = total_pages.max(1);
+            let search_id = cache.store_ym_search(query.to_string(), tracks.clone());
+            let text = format_ym_search_text(query, 0, total_pages);
+            let keyboard = build_track_selection_keyboard(search_id, &tracks, 0);
+
             let mut req = bot
-                .send_message(
-                    chat_id,
-                    format!("Найдено несколько треков по запросу «{query}». Выбери нужный:"),
-                )
-                .reply_markup(build_track_selection_keyboard(&tracks));
+                .send_message(chat_id, text)
+                .reply_markup(keyboard);
             if let Some(msg_id) = reply_to {
                 req = req.reply_parameters(ReplyParameters::new(msg_id));
             }
@@ -704,14 +901,15 @@ async fn handle_soundcloud_search(
             .await?;
         }
         Ok(tracks) => {
+            let total_pages = (tracks.len() + SEARCH_PAGE_SIZE - 1) / SEARCH_PAGE_SIZE;
+            let total_pages = total_pages.max(1);
+            let search_id = cache.store_sc_search(query.to_string(), tracks.clone());
+            let text = format_sc_search_text(query, 0, total_pages);
+            let keyboard = build_sc_selection_keyboard(search_id, &tracks, 0);
+
             let _ = bot
-                .edit_message_text(
-                    chat_id,
-                    status_msg.id,
-                    format!("Результаты поиска на SoundCloud по запросу «{query}»:
-Выбери нужный трек:"),
-                )
-                .reply_markup(build_sc_selection_keyboard(&tracks, cache))
+                .edit_message_text(chat_id, status_msg.id, text)
+                .reply_markup(keyboard)
                 .await;
         }
         Err(e) => {
@@ -753,13 +951,15 @@ async fn handle_youtube_search(
                 .await;
         }
         Ok(videos) => {
+            let total_pages = (videos.len() + SEARCH_PAGE_SIZE - 1) / SEARCH_PAGE_SIZE;
+            let total_pages = total_pages.max(1);
+            let search_id = cache.store_yt_search(query.to_string(), videos.clone());
+            let text = format_yt_search_text(query, 0, total_pages);
+            let keyboard = build_yt_selection_keyboard(search_id, &videos, 0);
+
             let _ = bot
-                .edit_message_text(
-                    chat_id,
-                    status_msg.id,
-                    format!("Результаты поиска на YouTube по запросу «{query}»:\nВыбери видео:"),
-                )
-                .reply_markup(build_yt_selection_keyboard(&videos, cache))
+                .edit_message_text(chat_id, status_msg.id, text)
+                .reply_markup(keyboard)
                 .await;
         }
         Err(e) => {
@@ -782,6 +982,7 @@ async fn handle_pornhub_search(
     chat_id: ChatId,
     reply_to: Option<MessageId>,
     query: &str,
+    cache: &MediaCache,
 ) -> ResponseResult<()> {
     match search_pornhub_videos(query).await {
         Ok(videos) if videos.is_empty() => {
@@ -795,12 +996,15 @@ async fn handle_pornhub_search(
             req.await?;
         }
         Ok(videos) => {
+            let total_pages = (videos.len() + SEARCH_PAGE_SIZE - 1) / SEARCH_PAGE_SIZE;
+            let total_pages = total_pages.max(1);
+            let search_id = cache.store_ph_search(query.to_string(), videos.clone());
+            let text = format_ph_search_text(query, 0, total_pages);
+            let keyboard = build_ph_selection_keyboard(search_id, &videos, 0);
+
             let mut req = bot
-                .send_message(
-                    chat_id,
-                    format!("Результаты поиска на Pornhub по запросу «{query}»:"),
-                )
-                .reply_markup(build_ph_selection_keyboard(&videos));
+                .send_message(chat_id, text)
+                .reply_markup(keyboard);
             if let Some(msg_id) = reply_to {
                 req = req.reply_parameters(ReplyParameters::new(msg_id));
             }
@@ -888,7 +1092,7 @@ pub async fn handle_message(
         }
 
         if let Some(query) = extract_ph_search_query(trimmed) {
-            handle_pornhub_search(&bot, msg.chat.id, Some(msg.id), query).await?;
+            handle_pornhub_search(&bot, msg.chat.id, Some(msg.id), query, &cache).await?;
             return Ok(());
         }
 
@@ -1082,88 +1286,60 @@ pub async fn handle_callback(
                 .await?;
             }
         }
-    } else if let Some(yt_payload) = data.strip_prefix("yt:") {
-        if yt_payload == "cancel" {
-            let _ = bot.answer_callback_query(q.id.clone()).await;
-            if let Some(msg) = q.regular_message() {
-                let _ = bot.delete_message(msg.chat.id, msg.id).await;
-            }
-            return Ok(());
-        }
-
-        let Ok(url_id) = yt_payload.parse::<u64>() else {
-            return Ok(());
-        };
-
-        let Some(url) = cache.resolve_url(url_id) else {
-            bot.answer_callback_query(q.id)
-                .text("Ссылка устарела, попробуй поиск заново")
-                .await?;
-            return Ok(());
-        };
-
-        let user_settings = settings.get(q.from.id);
-
-        if let Some(msg) = q.regular_message() {
-            let chat_id = msg.chat.id;
-            let reply_to = msg.reply_to_message().map(|m| m.id);
-
-            if user_settings.audio_only {
-                let _ = bot
-                    .answer_callback_query(q.id.clone())
-                    .text("Скачиваю аудио (MP3)...")
-                    .await;
-                let _ = bot.delete_message(chat_id, msg.id).await;
-
-                process_and_send_media(
-                    &bot,
-                    chat_id,
-                    reply_to,
-                    q.from.id,
-                    &url,
-                    true,
-                    None,
-                    &config,
-                    &queue,
-                    &cache,
-                )
-                .await?;
-            } else if user_settings.quality == QualityPreference::AskEveryTime {
-                let _ = bot.answer_callback_query(q.id.clone()).await;
-                let url_id = cache.register_url(&url);
-
-                let _ = bot
-                    .edit_message_text(chat_id, msg.id, "Выбери желаемое качество для этого видео:")
-                    .reply_markup(build_quality_selection_keyboard(url_id))
-                    .await;
-            } else {
-                let _ = bot
-                    .answer_callback_query(q.id.clone())
-                    .text("Скачиваю выбранное видео...")
-                    .await;
-                let _ = bot.delete_message(chat_id, msg.id).await;
-
-                process_and_send_media(
-                    &bot,
-                    chat_id,
-                    reply_to,
-                    q.from.id,
-                    &url,
-                    false,
-                    None,
-                    &config,
-                    &queue,
-                    &cache,
-                )
-                .await?;
-            }
-        }
     } else if let Some(ph_payload) = data.strip_prefix("ph:") {
         if ph_payload == "cancel" {
             let _ = bot.answer_callback_query(q.id.clone()).await;
             if let Some(msg) = q.regular_message() {
                 let _ = bot.delete_message(msg.chat.id, msg.id).await;
             }
+            return Ok(());
+        }
+
+        if let Some(rest) = ph_payload.strip_prefix("p:") {
+            let parts: Vec<&str> = rest.split(':').collect();
+            if parts.len() == 2 {
+                if let (Ok(search_id), Ok(page_idx)) = (parts[0].parse::<u64>(), parts[1].parse::<usize>()) {
+                    if let Some((query, videos)) = cache.get_ph_search(search_id) {
+                        let total_pages = (videos.len() + SEARCH_PAGE_SIZE - 1) / SEARCH_PAGE_SIZE;
+                        let total_pages = total_pages.max(1);
+                        let text = format_ph_search_text(&query, page_idx, total_pages);
+                        let keyboard = build_ph_selection_keyboard(search_id, &videos, page_idx);
+                        if let Some(msg) = q.regular_message() {
+                            let _ = bot
+                                .edit_message_text(msg.chat.id, msg.id, text)
+                                .reply_markup(keyboard)
+                                .await;
+                        }
+                        let _ = bot.answer_callback_query(q.id.clone()).await;
+                        return Ok(());
+                    } else {
+                        let _ = bot
+                            .answer_callback_query(q.id.clone())
+                            .text("Результаты поиска устарели, выполни поиск заново.")
+                            .await;
+                        return Ok(());
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        if let Some(rest) = ph_payload.strip_prefix("noop:") {
+            let parts: Vec<&str> = rest.split(':').collect();
+            if parts.len() == 2 {
+                if let (Ok(search_id), Ok(page_idx)) = (parts[0].parse::<u64>(), parts[1].parse::<usize>()) {
+                    if let Some((_, videos)) = cache.get_ph_search(search_id) {
+                        let total_pages = (videos.len() + SEARCH_PAGE_SIZE - 1) / SEARCH_PAGE_SIZE;
+                        let total_pages = total_pages.max(1);
+                        let _ = bot
+                            .answer_callback_query(q.id.clone())
+                            .text(format!("Страница {} из {}", page_idx + 1, total_pages))
+                            .await;
+                        return Ok(());
+                    }
+                }
+            }
+            let _ = bot.answer_callback_query(q.id.clone()).await;
             return Ok(());
         }
 
@@ -1224,56 +1400,60 @@ pub async fn handle_callback(
                 .await?;
             }
         }
-    } else if let Some(sc_payload) = data.strip_prefix("sc:") {
-        if sc_payload == "cancel" {
-            let _ = bot.answer_callback_query(q.id.clone()).await;
-            if let Some(msg) = q.regular_message() {
-                let _ = bot.delete_message(msg.chat.id, msg.id).await;
-            }
-            return Ok(());
-        }
-
-        let Ok(url_id) = sc_payload.parse::<u64>() else {
-            return Ok(());
-        };
-
-        let Some(url) = cache.resolve_url(url_id) else {
-            bot.answer_callback_query(q.id)
-                .text("Ссылка устарела, попробуй поиск заново")
-                .await?;
-            return Ok(());
-        };
-
-        let _ = bot
-            .answer_callback_query(q.id.clone())
-            .text("Скачиваю выбранный трек...")
-            .await;
-
-        if let Some(msg) = q.regular_message() {
-            let chat_id = msg.chat.id;
-            let reply_to = msg.reply_to_message().map(|m| m.id);
-            let _ = bot.delete_message(chat_id, msg.id).await;
-
-            process_and_send_media(
-                &bot,
-                chat_id,
-                reply_to,
-                q.from.id,
-                &url,
-                true,
-                None,
-                &config,
-                &queue,
-                &cache,
-            )
-            .await?;
-        }
     } else if let Some(ym_payload) = data.strip_prefix("ym:") {
         if ym_payload == "cancel" {
             let _ = bot.answer_callback_query(q.id.clone()).await;
             if let Some(msg) = q.regular_message() {
                 let _ = bot.delete_message(msg.chat.id, msg.id).await;
             }
+            return Ok(());
+        }
+
+        if let Some(rest) = ym_payload.strip_prefix("p:") {
+            let parts: Vec<&str> = rest.split(':').collect();
+            if parts.len() == 2 {
+                if let (Ok(search_id), Ok(page_idx)) = (parts[0].parse::<u64>(), parts[1].parse::<usize>()) {
+                    if let Some((query, tracks)) = cache.get_ym_search(search_id) {
+                        let total_pages = (tracks.len() + SEARCH_PAGE_SIZE - 1) / SEARCH_PAGE_SIZE;
+                        let total_pages = total_pages.max(1);
+                        let text = format_ym_search_text(&query, page_idx, total_pages);
+                        let keyboard = build_track_selection_keyboard(search_id, &tracks, page_idx);
+                        if let Some(msg) = q.regular_message() {
+                            let _ = bot
+                                .edit_message_text(msg.chat.id, msg.id, text)
+                                .reply_markup(keyboard)
+                                .await;
+                        }
+                        let _ = bot.answer_callback_query(q.id.clone()).await;
+                        return Ok(());
+                    } else {
+                        let _ = bot
+                            .answer_callback_query(q.id.clone())
+                            .text("Результаты поиска устарели, выполни поиск заново.")
+                            .await;
+                        return Ok(());
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        if let Some(rest) = ym_payload.strip_prefix("noop:") {
+            let parts: Vec<&str> = rest.split(':').collect();
+            if parts.len() == 2 {
+                if let (Ok(search_id), Ok(page_idx)) = (parts[0].parse::<u64>(), parts[1].parse::<usize>()) {
+                    if let Some((_, tracks)) = cache.get_ym_search(search_id) {
+                        let total_pages = (tracks.len() + SEARCH_PAGE_SIZE - 1) / SEARCH_PAGE_SIZE;
+                        let total_pages = total_pages.max(1);
+                        let _ = bot
+                            .answer_callback_query(q.id.clone())
+                            .text(format!("Страница {} из {}", page_idx + 1, total_pages))
+                            .await;
+                        return Ok(());
+                    }
+                }
+            }
+            let _ = bot.answer_callback_query(q.id.clone()).await;
             return Ok(());
         }
 
@@ -1306,7 +1486,360 @@ pub async fn handle_callback(
             )
             .await?;
         }
+    } else if let Some(yt_payload) = data.strip_prefix("yt:") {
+        if yt_payload == "cancel" {
+            let _ = bot.answer_callback_query(q.id.clone()).await;
+            if let Some(msg) = q.regular_message() {
+                let _ = bot.delete_message(msg.chat.id, msg.id).await;
+            }
+            return Ok(());
+        }
+
+        if let Some(rest) = yt_payload.strip_prefix("p:") {
+            let parts: Vec<&str> = rest.split(':').collect();
+            if parts.len() == 2 {
+                if let (Ok(search_id), Ok(page_idx)) = (parts[0].parse::<u64>(), parts[1].parse::<usize>()) {
+                    if let Some((query, videos)) = cache.get_yt_search(search_id) {
+                        let total_pages = (videos.len() + SEARCH_PAGE_SIZE - 1) / SEARCH_PAGE_SIZE;
+                        let total_pages = total_pages.max(1);
+                        let text = format_yt_search_text(&query, page_idx, total_pages);
+                        let keyboard = build_yt_selection_keyboard(search_id, &videos, page_idx);
+                        if let Some(msg) = q.regular_message() {
+                            let _ = bot
+                                .edit_message_text(msg.chat.id, msg.id, text)
+                                .reply_markup(keyboard)
+                                .await;
+                        }
+                        let _ = bot.answer_callback_query(q.id.clone()).await;
+                        return Ok(());
+                    } else {
+                        let _ = bot
+                            .answer_callback_query(q.id.clone())
+                            .text("Результаты поиска устарели, выполни поиск заново.")
+                            .await;
+                        return Ok(());
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        if let Some(rest) = yt_payload.strip_prefix("noop:") {
+            let parts: Vec<&str> = rest.split(':').collect();
+            if parts.len() == 2 {
+                if let (Ok(search_id), Ok(page_idx)) = (parts[0].parse::<u64>(), parts[1].parse::<usize>()) {
+                    if let Some((_, videos)) = cache.get_yt_search(search_id) {
+                        let total_pages = (videos.len() + SEARCH_PAGE_SIZE - 1) / SEARCH_PAGE_SIZE;
+                        let total_pages = total_pages.max(1);
+                        let _ = bot
+                            .answer_callback_query(q.id.clone())
+                            .text(format!("Страница {} из {}", page_idx + 1, total_pages))
+                            .await;
+                        return Ok(());
+                    }
+                }
+            }
+            let _ = bot.answer_callback_query(q.id.clone()).await;
+            return Ok(());
+        }
+
+        if let Some(msg) = q.regular_message() {
+            let chat_id = msg.chat.id;
+            let reply_to = msg.reply_to_message().map(|m| m.id);
+            let user_settings = settings.get(q.from.id);
+            let url = format!("https://www.youtube.com/watch?v={yt_payload}");
+
+            if user_settings.audio_only {
+                let _ = bot
+                    .answer_callback_query(q.id.clone())
+                    .text("Скачиваю аудио (MP3)...")
+                    .await;
+                let _ = bot.delete_message(chat_id, msg.id).await;
+
+                process_and_send_media(
+                    &bot,
+                    chat_id,
+                    reply_to,
+                    q.from.id,
+                    &url,
+                    true,
+                    None,
+                    &config,
+                    &queue,
+                    &cache,
+                )
+                .await?;
+            } else if user_settings.quality == QualityPreference::AskEveryTime {
+                let _ = bot.answer_callback_query(q.id.clone()).await;
+                let url_id = cache.register_url(&url);
+
+                let _ = bot
+                    .edit_message_text(chat_id, msg.id, "Выбери желаемое качество для этого видео:")
+                    .reply_markup(build_quality_selection_keyboard(url_id))
+                    .await;
+            } else {
+                let _ = bot
+                    .answer_callback_query(q.id.clone())
+                    .text("Скачиваю выбранное видео...")
+                    .await;
+                let _ = bot.delete_message(chat_id, msg.id).await;
+
+                process_and_send_media(
+                    &bot,
+                    chat_id,
+                    reply_to,
+                    q.from.id,
+                    &url,
+                    false,
+                    None,
+                    &config,
+                    &queue,
+                    &cache,
+                )
+                .await?;
+            }
+        }
+    } else if let Some(sc_payload) = data.strip_prefix("sc:") {
+        if sc_payload == "cancel" {
+            let _ = bot.answer_callback_query(q.id.clone()).await;
+            if let Some(msg) = q.regular_message() {
+                let _ = bot.delete_message(msg.chat.id, msg.id).await;
+            }
+            return Ok(());
+        }
+
+        if let Some(rest) = sc_payload.strip_prefix("p:") {
+            let parts: Vec<&str> = rest.split(':').collect();
+            if parts.len() == 2 {
+                if let (Ok(search_id), Ok(page_idx)) = (parts[0].parse::<u64>(), parts[1].parse::<usize>()) {
+                    if let Some((query, tracks)) = cache.get_sc_search(search_id) {
+                        let total_pages = (tracks.len() + SEARCH_PAGE_SIZE - 1) / SEARCH_PAGE_SIZE;
+                        let total_pages = total_pages.max(1);
+                        let text = format_sc_search_text(&query, page_idx, total_pages);
+                        let keyboard = build_sc_selection_keyboard(search_id, &tracks, page_idx);
+                        if let Some(msg) = q.regular_message() {
+                            let _ = bot
+                                .edit_message_text(msg.chat.id, msg.id, text)
+                                .reply_markup(keyboard)
+                                .await;
+                        }
+                        let _ = bot.answer_callback_query(q.id.clone()).await;
+                        return Ok(());
+                    } else {
+                        let _ = bot
+                            .answer_callback_query(q.id.clone())
+                            .text("Результаты поиска устарели, выполни поиск заново.")
+                            .await;
+                        return Ok(());
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        if let Some(rest) = sc_payload.strip_prefix("noop:") {
+            let parts: Vec<&str> = rest.split(':').collect();
+            if parts.len() == 2 {
+                if let (Ok(search_id), Ok(page_idx)) = (parts[0].parse::<u64>(), parts[1].parse::<usize>()) {
+                    if let Some((_, tracks)) = cache.get_sc_search(search_id) {
+                        let total_pages = (tracks.len() + SEARCH_PAGE_SIZE - 1) / SEARCH_PAGE_SIZE;
+                        let total_pages = total_pages.max(1);
+                        let _ = bot
+                            .answer_callback_query(q.id.clone())
+                            .text(format!("Страница {} из {}", page_idx + 1, total_pages))
+                            .await;
+                        return Ok(());
+                    }
+                }
+            }
+            let _ = bot.answer_callback_query(q.id.clone()).await;
+            return Ok(());
+        }
+
+        let parts: Vec<&str> = sc_payload.split(':').collect();
+        if parts.len() == 2 {
+            if let (Ok(search_id), Ok(item_idx)) = (parts[0].parse::<u64>(), parts[1].parse::<usize>()) {
+                if let Some((_, tracks)) = cache.get_sc_search(search_id) {
+                    if let Some(track) = tracks.get(item_idx) {
+                        let track_url = track.url.clone();
+                        let _ = bot
+                            .answer_callback_query(q.id.clone())
+                            .text("Скачиваю трек с SoundCloud...")
+                            .await;
+
+                        if let Some(msg) = q.regular_message() {
+                            let chat_id = msg.chat.id;
+                            let reply_to = msg.reply_to_message().map(|m| m.id);
+                            let _ = bot.delete_message(chat_id, msg.id).await;
+
+                            process_and_send_media(
+                                &bot,
+                                chat_id,
+                                reply_to,
+                                q.from.id,
+                                &track_url,
+                                true,
+                                None,
+                                &config,
+                                &queue,
+                                &cache,
+                            )
+                            .await?;
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        let _ = bot
+            .answer_callback_query(q.id)
+            .text("Трек устарел, выполни поиск заново")
+            .await;
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_search_texts() {
+        assert_eq!(
+            format_ph_search_text("test", 0, 1),
+            "Результаты поиска на Pornhub по запросу «test»:"
+        );
+        assert_eq!(
+            format_ph_search_text("test", 1, 3),
+            "Результаты поиска на Pornhub по запросу «test» (стр. 2/3):"
+        );
+        assert_eq!(
+            format_ym_search_text("test", 0, 1),
+            "Найдено несколько треков по запросу «test». Выбери нужный:"
+        );
+        assert_eq!(
+            format_ym_search_text("test", 0, 2),
+            "Найдено несколько треков по запросу «test» (стр. 1/2). Выбери нужный:"
+        );
+    }
+
+    #[test]
+    fn test_build_track_selection_keyboard_single_page() {
+        let tracks: Vec<YandexTrackInfo> = (1..=3)
+            .map(|i| YandexTrackInfo {
+                id: i.to_string(),
+                title: format!("Song {i}"),
+                version: None,
+                artists: vec!["Artist".to_string()],
+                duration_ms: Some(180000),
+            })
+            .collect();
+
+        let kb = build_track_selection_keyboard(123, &tracks, 0);
+        // 3 tracks + 1 cancel row
+        assert_eq!(kb.inline_keyboard.len(), 4);
+    }
+
+    #[test]
+    fn test_build_track_selection_keyboard_pagination() {
+        let tracks: Vec<YandexTrackInfo> = (1..=12)
+            .map(|i| YandexTrackInfo {
+                id: i.to_string(),
+                title: format!("Song {i}"),
+                version: None,
+                artists: vec!["Artist".to_string()],
+                duration_ms: Some(180000),
+            })
+            .collect();
+
+        // Page 0 (out of 3 pages: 5, 5, 2)
+        let kb_p0 = build_track_selection_keyboard(123, &tracks, 0);
+        // 5 tracks + 1 nav row + 1 cancel row = 7 rows
+        assert_eq!(kb_p0.inline_keyboard.len(), 7);
+        let nav_row_p0 = &kb_p0.inline_keyboard[5];
+        assert_eq!(nav_row_p0.len(), 2);
+        assert_eq!(nav_row_p0[0].text, "1/3");
+        assert_eq!(nav_row_p0[1].text, "Вперёд ➡️");
+
+        // Page 1 (middle page)
+        let kb_p1 = build_track_selection_keyboard(123, &tracks, 1);
+        assert_eq!(kb_p1.inline_keyboard.len(), 7);
+        let nav_row_p1 = &kb_p1.inline_keyboard[5];
+        assert_eq!(nav_row_p1.len(), 3);
+        assert_eq!(nav_row_p1[0].text, "⬅️ Назад");
+        assert_eq!(nav_row_p1[1].text, "2/3");
+        assert_eq!(nav_row_p1[2].text, "Вперёд ➡️");
+
+        // Page 2 (last page, 2 items)
+        let kb_p2 = build_track_selection_keyboard(123, &tracks, 2);
+        assert_eq!(kb_p2.inline_keyboard.len(), 4);
+        let nav_row_p2 = &kb_p2.inline_keyboard[2];
+        assert_eq!(nav_row_p2.len(), 2);
+        assert_eq!(nav_row_p2[0].text, "⬅️ Назад");
+        assert_eq!(nav_row_p2[1].text, "3/3");
+    }
+
+    #[test]
+    fn test_format_yt_sc_search_texts() {
+        assert_eq!(
+            format_yt_search_text("Queen", 0, 1),
+            "Результаты поиска на YouTube по запросу «Queen»:"
+        );
+        assert_eq!(
+            format_yt_search_text("Queen", 1, 4),
+            "Результаты поиска на YouTube по запросу «Queen» (стр. 2/4):"
+        );
+        assert_eq!(
+            format_sc_search_text("Hans Zimmer", 0, 1),
+            "Результаты поиска на SoundCloud по запросу «Hans Zimmer»:"
+        );
+        assert_eq!(
+            format_sc_search_text("Hans Zimmer", 2, 5),
+            "Результаты поиска на SoundCloud по запросу «Hans Zimmer» (стр. 3/5):"
+        );
+    }
+
+    #[test]
+    fn test_build_yt_selection_keyboard() {
+        let videos: Vec<YouTubeVideoInfo> = (1..=7)
+            .map(|i| YouTubeVideoInfo {
+                id: format!("yt_{i}"),
+                title: format!("Video {i}"),
+                uploader: Some("Channel".to_string()),
+                duration_str: Some("3:00".to_string()),
+                url: format!("https://www.youtube.com/watch?v=yt_{i}"),
+            })
+            .collect();
+
+        let kb = build_yt_selection_keyboard(42, &videos, 0);
+        // 5 videos + 1 nav row + 1 cancel row = 7 rows
+        assert_eq!(kb.inline_keyboard.len(), 7);
+        let nav_row = &kb.inline_keyboard[5];
+        assert_eq!(nav_row.len(), 2);
+        assert_eq!(nav_row[0].text, "1/2");
+        assert_eq!(nav_row[1].text, "Вперёд ➡️");
+    }
+
+    #[test]
+    fn test_build_sc_selection_keyboard() {
+        let tracks: Vec<SoundcloudTrackInfo> = (1..=7)
+            .map(|i| SoundcloudTrackInfo {
+                id: format!("sc_{i}"),
+                title: format!("Track {i}"),
+                uploader: Some("Artist".to_string()),
+                duration_str: Some("3:30".to_string()),
+                url: format!("https://soundcloud.com/artist/track_{i}"),
+            })
+            .collect();
+
+        let kb = build_sc_selection_keyboard(99, &tracks, 1);
+        // 2 tracks (page 1) + 1 nav row + 1 cancel row = 4 rows
+        assert_eq!(kb.inline_keyboard.len(), 4);
+        let nav_row = &kb.inline_keyboard[2];
+        assert_eq!(nav_row.len(), 2);
+        assert_eq!(nav_row[0].text, "⬅️ Назад");
+        assert_eq!(nav_row[1].text, "2/2");
+    }
 }

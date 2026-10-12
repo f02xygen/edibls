@@ -64,6 +64,7 @@ COPY --from=builder /usr/src/edibls/target/release/edibls /usr/local/bin/edibls
 
 # Run as a dedicated non-root user (with write access to Python site-packages/bin for yt-dlp auto-updates)
 RUN useradd -m -u 1000 appuser \
+    && mkdir -p /app/data \
     && chown -R appuser:appuser /app /usr/local/lib/python3.12 /usr/local/bin
 USER appuser
 

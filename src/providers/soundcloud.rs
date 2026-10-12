@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashSet;
+use std::time::Duration;
 use tokio::process::Command;
 
-const MAX_SEARCH_RESULTS: usize = 8;
+const MAX_SEARCH_RESULTS: usize = 30;
+const SEARCH_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Metadata for a single SoundCloud track returned from search.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,13 +59,23 @@ pub fn is_soundcloud_url(url: &str) -> bool {
 /// Searches SoundCloud tracks using yt-dlp flat-playlist scsearch.
 pub async fn search_soundcloud_tracks(query: &str) -> Result<Vec<SoundcloudTrackInfo>> {
     let search_spec = format!("scsearch{MAX_SEARCH_RESULTS}:{query}");
-    let output = Command::new("yt-dlp")
-        .args(["--dump-json", "--flat-playlist", &search_spec])
-        .output()
-        .await
-        .context("Failed to execute yt-dlp for SoundCloud search")?;
+    let output = tokio::time::timeout(
+        SEARCH_TIMEOUT,
+        Command::new("yt-dlp")
+            .args([
+                "--dump-json",
+                "--flat-playlist",
+                "--no-warnings",
+                "--ignore-errors",
+                &search_spec,
+            ])
+            .output(),
+    )
+    .await
+    .context("SoundCloud search timed out")?
+    .context("Failed to execute yt-dlp for SoundCloud search")?;
 
-    if !output.status.success() {
+    if !output.status.success() && output.stdout.is_empty() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         log::error!("yt-dlp scsearch failed: {}", stderr);
         return Err(anyhow::anyhow!("SoundCloud search process exited with error"));

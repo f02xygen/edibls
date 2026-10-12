@@ -6,8 +6,10 @@ use lofty::probe::Probe;
 
 use crate::config::Config;
 use crate::providers::soundcloud::is_soundcloud_url;
+use crate::providers::spotify::{download_spotify_entity, is_spotify_url};
 use crate::providers::yandex::{download_yandex_track, is_yandex_music_url};
 use crate::providers::ytdlp::download_media;
+
 
 pub struct AudioTrack {
     pub path: PathBuf,
@@ -90,6 +92,27 @@ pub fn extract_ph_search_query(text: &str) -> Option<&str> {
     None
 }
 
+/// Extracts a Spotify search query from the message text (/sp <query> or /spotify <query>).
+pub fn extract_sp_search_query(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || extract_url(trimmed).is_some() {
+        return None;
+    }
+
+    if let Some(first_word) = trimmed.split_whitespace().next() {
+        if first_word.starts_with('/') {
+            let cmd = first_word.split('@').next().unwrap_or(first_word);
+            if matches!(cmd, "/sp" | "/spotify") {
+                let rest = trimmed[first_word.len()..].trim();
+                if !rest.is_empty() {
+                    return Some(rest);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Extracts a Yandex Music track search query from the message text.
 /// Supports `/ym <query>`, `/audio <query>`, `/mp3 <query>`, `/search <query>` in any chat,
 /// as well as plain text (without links or slash commands) in private chats.
@@ -124,11 +147,14 @@ pub fn is_audio_request(url: &str, text: &str, user_audio_only_setting: bool) ->
     user_audio_only_setting
         || is_yandex_music_url(url)
         || is_soundcloud_url(url)
+        || is_spotify_url(url)
         || text.starts_with("/audio")
         || text.starts_with("/mp3")
         || text.starts_with("/sc")
+        || text.starts_with("/sp")
         || text.contains("audio")
 }
+
 
 /// Reads audio tags and resizes the cover image to fit Telegram API restrictions (max 320x320).
 pub fn process_audio_metadata(file_path: &Path) -> AudioTrack {
@@ -237,6 +263,16 @@ pub async fn fetch_media(
         return Ok(MediaOutput::Audio(tracks));
     }
 
+    if is_spotify_url(url) {
+        let tracks = download_spotify_entity(url, temp_dir, config, progress)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        progress.store(100, std::sync::atomic::Ordering::Relaxed);
+        return Ok(MediaOutput::Audio(tracks));
+    }
+
+
     let file_path = download_media(url, audio_only, max_height, temp_dir, config, progress).await?;
 
     if audio_only {
@@ -298,12 +334,24 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_sp_search_query() {
+        assert_eq!(extract_sp_search_query("/sp rick astley"), Some("rick astley"));
+        assert_eq!(extract_sp_search_query("/sp@edibls_bot rick astley"), Some("rick astley"));
+        assert_eq!(extract_sp_search_query("/spotify rick astley"), Some("rick astley"));
+        assert_eq!(extract_sp_search_query("/sp"), None);
+        assert_eq!(extract_sp_search_query("/sp https://open.spotify.com/track/123"), None);
+        assert_eq!(extract_sp_search_query("just words"), None);
+    }
+
+    #[test]
     fn test_is_audio_request() {
         assert!(is_audio_request("https://youtube.com/watch?v=123", "/audio https://youtube.com/watch?v=123", false));
         assert!(is_audio_request("https://music.yandex.ru/track/123", "https://music.yandex.ru/track/123", false));
+        assert!(is_audio_request("https://open.spotify.com/track/123", "https://open.spotify.com/track/123", false));
         assert!(is_audio_request("https://pornhub.com/view_video.php?viewkey=123", "https://pornhub.com/view_video.php?viewkey=123", true));
         assert!(!is_audio_request("https://pornhub.com/view_video.php?viewkey=123", "https://pornhub.com/view_video.php?viewkey=123", false));
     }
+
 
     #[test]
     fn test_format_progress_bar() {

@@ -9,8 +9,8 @@ use tempfile::TempDir;
 use crate::cache::{CachedMedia, MediaCache};
 use crate::config::Config;
 use crate::media::{
-    extract_ph_search_query, extract_sc_search_query, extract_search_query, extract_url,
-    extract_yt_search_query, fetch_media, format_progress_bar, get_video_dimensions,
+    extract_ph_search_query, extract_sc_search_query, extract_search_query, extract_time_range,
+    extract_url, extract_yt_search_query, fetch_media, format_progress_bar,
     is_audio_request, read_network_tx_bytes, MediaOutput,
 };
 use crate::providers::pornhub::{search_pornhub_videos, PornhubVideoInfo};
@@ -18,7 +18,7 @@ use crate::providers::soundcloud::{search_soundcloud_tracks, SoundcloudTrackInfo
 use crate::providers::yandex::{search_yandex_tracks, YandexTrackInfo};
 use crate::providers::youtube::{search_youtube_videos, YouTubeVideoInfo};
 use crate::queue::QueueManager;
-use crate::settings::{QualityPreference, UserSettings, UserSettingsStore};
+use crate::settings::{DefaultSearchProvider, QualityPreference, UserSettings, UserSettingsStore};
 
 const WELCOME_MESSAGE: &str = "<b>EDIBLS</b> — бот для быстрой загрузки видео и музыки.
 
@@ -27,12 +27,13 @@ YouTube, TikTok, Instagram, SoundCloud, Яндекс Музыка, Pornhub, VK �
 
 <b>Как пользоваться:</b>
 • <b>Видео:</b> просто отправь ссылку в чат (под видео будет кнопка <code>🎵 Скачать аудио</code>).
+• <b>Отрезок видео / аудио:</b> добавь таймкод к ссылке, например <code>&lt;ссылка&gt; 01:15-02:30</code> или <code>/clip &lt;ссылка&gt; 01:15-02:30</code>.
 • <b>Только аудио по ссылке:</b> <code>/audio &lt;ссылка&gt;</code> или прямая ссылка на SoundCloud / Яндекс Музыку.
 • <b>Поиск на YouTube:</b> <code>/yt &lt;запрос&gt;</code>
 • <b>Поиск на SoundCloud:</b> <code>/sc &lt;запрос&gt;</code>
 • <b>Поиск на Яндекс Музыке:</b> <code>/ym &lt;запрос&gt;</code> или название трека в ЛС
 • <b>Поиск на Pornhub:</b> <code>/ph &lt;запрос&gt;</code>
-• <b>Настройки:</b> <code>/settings</code> (разрешение видео, режим «только аудио», отправка файлом, AAC/FLAC для Я.Музыки)
+• <b>Настройки:</b> <code>/settings</code> (разрешение видео, поисковик в ЛС, режим «только аудио», отправка файлом, AAC/FLAC для Я.Музыки)
 
 <i>Поддерживаются видео в высоком качестве (до 2 ГБ) без водяных знаков.</i>";
 
@@ -41,6 +42,13 @@ fn build_audio_button(url_id: u64) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::callback(
         "🎵 Скачать аудио",
         format!("audio:{url_id}"),
+    )]])
+}
+
+fn build_cancel_download_keyboard(user_id: UserId) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::callback(
+        "✖️ Отменить",
+        format!("dl:cancel:{}", user_id.0),
     )]])
 }
 
@@ -83,11 +91,17 @@ fn build_settings_text(settings: &UserSettings) -> String {
     } else {
         "Выключена <i>(как медиа: видео/музыка)</i>"
     };
+    let search_desc = match settings.default_search {
+        crate::settings::DefaultSearchProvider::Yandex => "Яндекс Музыка 🎶",
+        crate::settings::DefaultSearchProvider::SoundCloud => "SoundCloud ☁️",
+        crate::settings::DefaultSearchProvider::YouTube => "YouTube 🎬",
+    };
 
     format!(
         "⚙️ <b>Настройки загрузки</b>\n\n\
         🎬 <b>Качество видео:</b> {q_desc}\n\
         🎶 <b>Яндекс Музыка:</b> {ym_desc}\n\
+        🔍 <b>Поиск в ЛС:</b> {search_desc}\n\
         🎵 <b>Только аудио:</b> {a_desc}\n\
         📎 <b>Отправка файлом:</b> {doc_desc}\n\n\
         <i>Нажми на кнопку, чтобы переключить:</i>"
@@ -103,6 +117,12 @@ fn build_settings_keyboard(settings: &UserSettings) -> InlineKeyboardMarkup {
     let ym_label = match settings.ym_quality {
         crate::settings::YandexQualityPreference::Optimal => "🎶 Я.Музыка: AAC 192k ⚡",
         crate::settings::YandexQualityPreference::Lossless => "🎶 Я.Музыка: FLAC 💎",
+    };
+
+    let search_label = match settings.default_search {
+        crate::settings::DefaultSearchProvider::Yandex => "🔍 Поиск в ЛС: Я.Музыка 🎶",
+        crate::settings::DefaultSearchProvider::SoundCloud => "🔍 Поиск в ЛС: SoundCloud ☁️",
+        crate::settings::DefaultSearchProvider::YouTube => "🔍 Поиск в ЛС: YouTube 🎬",
     };
 
     let audio_label = if settings.audio_only {
@@ -128,17 +148,22 @@ fn build_settings_keyboard(settings: &UserSettings) -> InlineKeyboardMarkup {
             ym_label,
             "settings:toggle:ym_quality",
         )],
-        // Row 3: Audio-only toggle — full width
+        // Row 3: Default search in private chat toggle — full width
+        vec![InlineKeyboardButton::callback(
+            search_label,
+            "settings:toggle:search",
+        )],
+        // Row 4: Audio-only toggle — full width
         vec![InlineKeyboardButton::callback(
             audio_label,
             "settings:toggle:audio",
         )],
-        // Row 4: Document toggle — full width
+        // Row 5: Document toggle — full width
         vec![InlineKeyboardButton::callback(
             doc_label,
             "settings:toggle:document",
         )],
-        // Row 5: Close button — full width
+        // Row 6: Close button — full width
         vec![InlineKeyboardButton::callback(
             "✖️ Закрыть",
             "settings:close",
@@ -242,6 +267,11 @@ fn build_track_selection_keyboard(
         }
         rows.push(nav_row);
     }
+
+    rows.push(vec![
+        InlineKeyboardButton::callback("☁️ SoundCloud", format!("sw:sc:{search_id}")),
+        InlineKeyboardButton::callback("🎬 YouTube", format!("sw:yt:{search_id}")),
+    ]);
 
     rows.push(vec![InlineKeyboardButton::callback(
         "❌ Отмена",
@@ -353,6 +383,11 @@ fn build_yt_selection_keyboard(
         rows.push(nav_row);
     }
 
+    rows.push(vec![
+        InlineKeyboardButton::callback("🎶 Я.Музыка", format!("sw:ym:{search_id}")),
+        InlineKeyboardButton::callback("☁️ SoundCloud", format!("sw:sc:{search_id}")),
+    ]);
+
     rows.push(vec![InlineKeyboardButton::callback(
         "❌ Отмена",
         "yt:cancel",
@@ -410,6 +445,11 @@ fn build_sc_selection_keyboard(
         rows.push(nav_row);
     }
 
+    rows.push(vec![
+        InlineKeyboardButton::callback("🎶 Я.Музыка", format!("sw:ym:{search_id}")),
+        InlineKeyboardButton::callback("🎬 YouTube", format!("sw:yt:{search_id}")),
+    ]);
+
     rows.push(vec![InlineKeyboardButton::callback(
         "❌ Отмена",
         "sc:cancel",
@@ -418,6 +458,31 @@ fn build_sc_selection_keyboard(
     InlineKeyboardMarkup::new(rows)
 }
 
+fn build_empty_search_keyboard(search_id: u64, current: &str) -> InlineKeyboardMarkup {
+    let mut switch_row = Vec::new();
+    if current != "ym" {
+        switch_row.push(InlineKeyboardButton::callback(
+            "🎶 Я.Музыка",
+            format!("sw:ym:{search_id}"),
+        ));
+    }
+    if current != "sc" {
+        switch_row.push(InlineKeyboardButton::callback(
+            "☁️ SoundCloud",
+            format!("sw:sc:{search_id}"),
+        ));
+    }
+    if current != "yt" {
+        switch_row.push(InlineKeyboardButton::callback(
+            "🎬 YouTube",
+            format!("sw:yt:{search_id}"),
+        ));
+    }
+    InlineKeyboardMarkup::new(vec![
+        switch_row,
+        vec![InlineKeyboardButton::callback("❌ Закрыть", "search:close")],
+    ])
+}
 
 pub async fn process_and_send_media(
     bot: &Bot,
@@ -427,12 +492,20 @@ pub async fn process_and_send_media(
     url: &str,
     audio_only: bool,
     max_height: Option<u16>,
+    time_range: Option<crate::media::TimeRange>,
     ym_quality: crate::settings::YandexQualityPreference,
     send_as_document: bool,
     config: &Arc<Config>,
     queue: &QueueManager,
     cache: &MediaCache,
 ) -> ResponseResult<()> {
+    // Construct effective cache URL taking timecode cuts into account
+    let effective_cache_url = if let Some(ref tr) = time_range {
+        format!("{url}#clip={}-{}", tr.start_secs, tr.end_secs)
+    } else {
+        url.to_string()
+    };
+
     // For Yandex Music, differentiate AAC vs Lossless in cache using a quality tag in max_height
     let effective_cache_height = if crate::providers::yandex::is_yandex_music_url(url) {
         match ym_quality {
@@ -444,10 +517,10 @@ pub async fn process_and_send_media(
     };
 
     // 1. Fast path: check Telegram file_id cache (0.1s instant response, bypasses queue)
-    if let Some(cached) = cache.get(url, audio_only, effective_cache_height, send_as_document) {
+    if let Some(cached) = cache.get(&effective_cache_url, audio_only, effective_cache_height, send_as_document) {
         match cached {
             CachedMedia::Video(file_id) => {
-                let url_id = cache.register_url(url);
+                let url_id = cache.register_url(&effective_cache_url);
                 if send_as_document {
                     let mut req = bot
                         .send_document(chat_id, InputFile::file_id(file_id))
@@ -492,9 +565,9 @@ pub async fn process_and_send_media(
         }
     }
 
-    // 2. Slow path: acquire user lock and queue slot
-    let _user_guard = match queue.try_lock_user(user_id) {
-        Some(guard) => guard,
+    // 2. Slow path: acquire user lock with cancellation receiver
+    let (_user_guard, mut cancel_rx) = match queue.try_lock_user(user_id) {
+        Some((guard, rx)) => (guard, rx),
         None => {
             let mut req = bot.send_message(
                 chat_id,
@@ -520,17 +593,32 @@ pub async fn process_and_send_media(
         "⏳ Подготовка к загрузке...".to_string()
     };
 
-    let mut status_req = bot.send_message(chat_id, status_text);
+    let mut status_req = bot
+        .send_message(chat_id, status_text)
+        .reply_markup(build_cancel_download_keyboard(user_id));
     if let Some(msg_id) = reply_to {
         status_req = status_req.reply_parameters(ReplyParameters::new(msg_id));
     }
     let status_msg = status_req.await?;
 
-    // Lock domain & wait for global download slot
-    let service_guard = queue.acquire(service, waiter_guard).await;
+    // Lock domain & wait for global download slot (with early cancellation)
+    let service_guard = tokio::select! {
+        _ = async {
+            while cancel_rx.changed().await.is_ok() {
+                if *cancel_rx.borrow() {
+                    break;
+                }
+            }
+        } => {
+            let _ = bot.delete_message(chat_id, status_msg.id).await;
+            return Ok(());
+        }
+        guard = queue.acquire(service, waiter_guard) => guard,
+    };
 
     let _ = bot
         .edit_message_text(chat_id, status_msg.id, format_progress_bar("📥 Скачивание", 0))
+        .reply_markup(build_cancel_download_keyboard(user_id))
         .await;
 
     let temp_dir = match TempDir::new() {
@@ -552,6 +640,7 @@ pub async fn process_and_send_media(
     let dl_msg_id = status_msg.id;
     let dl_prog_clone = Arc::clone(&dl_progress);
     let dl_shown_clone = Arc::clone(&dl_shown_pct);
+    let dl_user_id = user_id;
     let dl_updater = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(400));
         interval.tick().await;
@@ -565,21 +654,31 @@ pub async fn process_and_send_media(
                 dl_shown_clone.store(pct, Ordering::Relaxed);
                 let _ = dl_bot
                     .edit_message_text(chat_id, dl_msg_id, format_progress_bar("📥 Скачивание", pct))
+                    .reply_markup(build_cancel_download_keyboard(dl_user_id))
                     .await;
             }
         }
     });
 
-    let media_result = fetch_media(
-        url,
-        audio_only,
-        max_height,
-        ym_quality,
-        temp_dir.path(),
-        config,
-        &dl_progress,
-    )
-    .await;
+    let media_result = tokio::select! {
+        _ = cancel_rx.changed() => {
+            dl_updater.abort();
+            drop(service_guard);
+            drop(_user_guard);
+            let _ = bot.delete_message(chat_id, status_msg.id).await;
+            return Ok(());
+        }
+        res = fetch_media(
+            url,
+            audio_only,
+            max_height,
+            time_range.as_ref(),
+            ym_quality,
+            temp_dir.path(),
+            config,
+            &dl_progress,
+        ) => res,
+    };
 
     dl_updater.abort();
 
@@ -627,8 +726,6 @@ pub async fn process_and_send_media(
                         let raw_pct = (sent as f64 / (total_files_bytes as f64 * 1.05)) * 100.0;
                         let tx_pct = raw_pct.round().clamp(0.0, 95.0) as u8;
                         let pct = if total_files_bytes < 15 * 1024 * 1024 {
-                            // Small audio files (e.g. 2-5 MB SoundCloud MP3s) are absorbed by OS TCP buffers
-                            // almost immediately while Telegram DC processes sendAudio; step smoothly.
                             last_pct.saturating_add(28).min(92)
                         } else {
                             let floor_pct = last_pct.saturating_add(8).min(25);
@@ -712,6 +809,9 @@ pub async fn process_and_send_media(
                     if let Some(t) = &track.title {
                         request = request.title(t);
                     }
+                    if let Some(d) = track.duration_secs {
+                        request = request.duration(d);
+                    }
                     if let Some(cover_path) = &track.cover_path {
                         request = request.thumbnail(InputFile::file(cover_path));
                     }
@@ -743,12 +843,13 @@ pub async fn process_and_send_media(
                 .await;
 
             if !uploaded_ids.is_empty() {
-                cache.insert(url, true, effective_cache_height, send_as_document, CachedMedia::Audio(uploaded_ids), total_size);
+                cache.insert(&effective_cache_url, true, effective_cache_height, send_as_document, CachedMedia::Audio(uploaded_ids), total_size);
             }
 
             let _ = bot.delete_message(chat_id, status_msg.id).await;
         }
-        Ok(MediaOutput::Video(file_path)) => {
+        Ok(MediaOutput::Video(video_file)) => {
+            let file_path = video_file.path.clone();
             let file_size = tokio::fs::metadata(&file_path)
                 .await
                 .map(|m| m.len())
@@ -792,27 +893,45 @@ pub async fn process_and_send_media(
                 }
             });
 
-            let url_id = cache.register_url(url);
+            let url_id = cache.register_url(&effective_cache_url);
             let send_res = if send_as_document {
+                let mut input_file = InputFile::file(&file_path);
+                let ext = file_path.extension().and_then(|s| s.to_str()).unwrap_or("mp4");
+                if let Some(t) = &video_file.title {
+                    let clean_title: String = t.chars().filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '_').collect();
+                    let clean_title = clean_title.trim();
+                    if !clean_title.is_empty() {
+                        input_file = input_file.file_name(format!("{clean_title}.{ext}"));
+                    }
+                }
+
                 let mut request = bot
-                    .send_document(chat_id, InputFile::file(&file_path))
+                    .send_document(chat_id, input_file)
                     .disable_content_type_detection(true)
                     .reply_markup(build_audio_button(url_id));
 
                 if let Some(msg_id) = reply_to {
                     request = request.reply_parameters(ReplyParameters::new(msg_id));
                 }
+                if let Some(thumb) = &video_file.thumbnail_path {
+                    request = request.thumbnail(InputFile::file(thumb));
+                }
                 request.await
             } else {
-                let video_dims = get_video_dimensions(&file_path).await;
                 let input_file = InputFile::file(&file_path);
                 let mut request = bot
                     .send_video(chat_id, input_file)
                     .supports_streaming(true)
                     .reply_markup(build_audio_button(url_id));
 
-                if let Some((w, h)) = video_dims {
+                if let (Some(w), Some(h)) = (video_file.width, video_file.height) {
                     request = request.width(w).height(h);
+                }
+                if let Some(d) = video_file.duration_secs {
+                    request = request.duration(d);
+                }
+                if let Some(thumb) = &video_file.thumbnail_path {
+                    request = request.thumbnail(InputFile::file(thumb));
                 }
 
                 if let Some(msg_id) = reply_to {
@@ -828,7 +947,7 @@ pub async fn process_and_send_media(
                     if send_as_document {
                         if let Some(doc) = sent_msg.document() {
                             cache.insert(
-                                url,
+                                &effective_cache_url,
                                 false,
                                 max_height,
                                 send_as_document,
@@ -838,7 +957,7 @@ pub async fn process_and_send_media(
                         }
                     } else if let Some(video) = sent_msg.video() {
                         cache.insert(
-                            url,
+                            &effective_cache_url,
                             false,
                             max_height,
                             send_as_document,
@@ -870,10 +989,11 @@ pub async fn process_and_send_media(
                             )
                             .await;
 
-                        if let Ok(MediaOutput::Video(smaller_path)) = fetch_media(
+                        if let Ok(MediaOutput::Video(smaller_video)) = fetch_media(
                             url,
                             false,
                             Some(480),
+                            time_range.as_ref(),
                             ym_quality,
                             temp_dir.path(),
                             &fallback_cfg,
@@ -888,23 +1008,41 @@ pub async fn process_and_send_media(
                                     format_progress_bar("📤 Отправка", 50),
                                 )
                                 .await;
+                            let smaller_path = smaller_video.path.clone();
                             let retry_res = if send_as_document {
+                                let mut input_file = InputFile::file(&smaller_path);
+                                let ext = smaller_path.extension().and_then(|s| s.to_str()).unwrap_or("mp4");
+                                if let Some(t) = &smaller_video.title {
+                                    let clean_title: String = t.chars().filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '_').collect();
+                                    let clean_title = clean_title.trim();
+                                    if !clean_title.is_empty() {
+                                        input_file = input_file.file_name(format!("{clean_title}.{ext}"));
+                                    }
+                                }
                                 let mut retry_req = bot
-                                    .send_document(chat_id, InputFile::file(&smaller_path))
+                                    .send_document(chat_id, input_file)
                                     .disable_content_type_detection(true)
                                     .reply_markup(build_audio_button(url_id));
                                 if let Some(msg_id) = reply_to {
                                     retry_req = retry_req.reply_parameters(ReplyParameters::new(msg_id));
                                 }
+                                if let Some(thumb) = &smaller_video.thumbnail_path {
+                                    retry_req = retry_req.thumbnail(InputFile::file(thumb));
+                                }
                                 retry_req.await
                             } else {
-                                let smaller_dims = get_video_dimensions(&smaller_path).await;
                                 let mut retry_req = bot
                                     .send_video(chat_id, InputFile::file(&smaller_path))
                                     .supports_streaming(true)
                                     .reply_markup(build_audio_button(url_id));
-                                if let Some((w, h)) = smaller_dims {
+                                if let (Some(w), Some(h)) = (smaller_video.width, smaller_video.height) {
                                     retry_req = retry_req.width(w).height(h);
+                                }
+                                if let Some(d) = smaller_video.duration_secs {
+                                    retry_req = retry_req.duration(d);
+                                }
+                                if let Some(thumb) = &smaller_video.thumbnail_path {
+                                    retry_req = retry_req.thumbnail(InputFile::file(thumb));
                                 }
                                 if let Some(msg_id) = reply_to {
                                     retry_req = retry_req.reply_parameters(ReplyParameters::new(msg_id));
@@ -916,7 +1054,7 @@ pub async fn process_and_send_media(
                                 if send_as_document {
                                     if let Some(doc) = sent_msg.document() {
                                         cache.insert(
-                                            url,
+                                            &effective_cache_url,
                                             false,
                                             max_height,
                                             send_as_document,
@@ -926,7 +1064,7 @@ pub async fn process_and_send_media(
                                     }
                                 } else if let Some(video) = sent_msg.video() {
                                     cache.insert(
-                                        url,
+                                        &effective_cache_url,
                                         false,
                                         max_height,
                                         send_as_document,
@@ -965,6 +1103,7 @@ async fn handle_yandex_search(
     bot: &Bot,
     chat_id: ChatId,
     reply_to: Option<MessageId>,
+    existing_msg_id: Option<MessageId>,
     user_id: UserId,
     query: &str,
     config: &Arc<Config>,
@@ -973,36 +1112,49 @@ async fn handle_yandex_search(
     settings: &UserSettingsStore,
 ) -> ResponseResult<()> {
     if config.yandex_music_token.is_none() {
-        let mut req = bot.send_message(
-            chat_id,
-            "Поиск недоступен: YANDEX_MUSIC_TOKEN не настроен в .env файле.",
-        );
-        if let Some(msg_id) = reply_to {
-            req = req.reply_parameters(ReplyParameters::new(msg_id));
+        let msg = "Поиск недоступен: YANDEX_MUSIC_TOKEN не настроен в .env файле.";
+        if let Some(mid) = existing_msg_id {
+            let _ = bot.edit_message_text(chat_id, mid, msg).await;
+        } else {
+            let mut req = bot.send_message(chat_id, msg);
+            if let Some(msg_id) = reply_to {
+                req = req.reply_parameters(ReplyParameters::new(msg_id));
+            }
+            req.await?;
         }
-        req.await?;
         return Ok(());
     }
 
-    let mut status_req = bot.send_message(chat_id, format!("🔍 Ищу на Яндекс Музыке: «{query}»..."));
-    if let Some(msg_id) = reply_to {
-        status_req = status_req.reply_parameters(ReplyParameters::new(msg_id));
-    }
-    let status_msg = status_req.await?;
+    let status_msg_id = if let Some(mid) = existing_msg_id {
+        let _ = bot
+            .edit_message_text(chat_id, mid, format!("🔍 Ищу на Яндекс Музыке: «{query}»..."))
+            .reply_markup(InlineKeyboardMarkup::default())
+            .await;
+        mid
+    } else {
+        let mut status_req = bot.send_message(chat_id, format!("🔍 Ищу на Яндекс Музыке: «{query}»..."));
+        if let Some(msg_id) = reply_to {
+            status_req = status_req.reply_parameters(ReplyParameters::new(msg_id));
+        }
+        let status_msg = status_req.await?;
+        status_msg.id
+    };
 
     match search_yandex_tracks(query, config.yandex_music_token.as_deref()).await {
         Ok(tracks) if tracks.is_empty() => {
+            let search_id = cache.store_search_query(query.to_string());
             let _ = bot
                 .edit_message_text(
                     chat_id,
-                    status_msg.id,
+                    status_msg_id,
                     format!("По запросу «{query}» ничего не найдено на Яндекс Музыке."),
                 )
+                .reply_markup(build_empty_search_keyboard(search_id, "ym"))
                 .await;
         }
         Ok(tracks) if tracks.len() == 1 => {
             let url = tracks[0].canonical_url();
-            let _ = bot.delete_message(chat_id, status_msg.id).await;
+            let _ = bot.delete_message(chat_id, status_msg_id).await;
             let user_settings = settings.get(user_id);
             process_and_send_media(
                 bot,
@@ -1011,6 +1163,7 @@ async fn handle_yandex_search(
                 user_id,
                 &url,
                 true,
+                None,
                 None,
                 user_settings.ym_quality,
                 user_settings.send_as_document,
@@ -1028,7 +1181,7 @@ async fn handle_yandex_search(
             let keyboard = build_track_selection_keyboard(search_id, &tracks, 0);
 
             let _ = bot
-                .edit_message_text(chat_id, status_msg.id, text)
+                .edit_message_text(chat_id, status_msg_id, text)
                 .parse_mode(ParseMode::Html)
                 .reply_markup(keyboard)
                 .await;
@@ -1038,7 +1191,7 @@ async fn handle_yandex_search(
             let _ = bot
                 .edit_message_text(
                     chat_id,
-                    status_msg.id,
+                    status_msg_id,
                     format!("Ошибка при поиске на Яндекс Музыке: {e}"),
                 )
                 .await;
@@ -1052,6 +1205,7 @@ async fn handle_soundcloud_search(
     bot: &Bot,
     chat_id: ChatId,
     reply_to: Option<MessageId>,
+    existing_msg_id: Option<MessageId>,
     user_id: UserId,
     query: &str,
     config: &Arc<Config>,
@@ -1059,25 +1213,36 @@ async fn handle_soundcloud_search(
     cache: &MediaCache,
     settings: &UserSettingsStore,
 ) -> ResponseResult<()> {
-    let mut status_req = bot.send_message(chat_id, format!("🔍 Ищу на SoundCloud: «{query}»..."));
-    if let Some(msg_id) = reply_to {
-        status_req = status_req.reply_parameters(ReplyParameters::new(msg_id));
-    }
-    let status_msg = status_req.await?;
+    let status_msg_id = if let Some(mid) = existing_msg_id {
+        let _ = bot
+            .edit_message_text(chat_id, mid, format!("🔍 Ищу на SoundCloud: «{query}»..."))
+            .reply_markup(InlineKeyboardMarkup::default())
+            .await;
+        mid
+    } else {
+        let mut status_req = bot.send_message(chat_id, format!("🔍 Ищу на SoundCloud: «{query}»..."));
+        if let Some(msg_id) = reply_to {
+            status_req = status_req.reply_parameters(ReplyParameters::new(msg_id));
+        }
+        let status_msg = status_req.await?;
+        status_msg.id
+    };
 
     match search_soundcloud_tracks(query).await {
         Ok(tracks) if tracks.is_empty() => {
+            let search_id = cache.store_search_query(query.to_string());
             let _ = bot
                 .edit_message_text(
                     chat_id,
-                    status_msg.id,
+                    status_msg_id,
                     format!("По запросу «{query}» ничего не найдено на SoundCloud."),
                 )
+                .reply_markup(build_empty_search_keyboard(search_id, "sc"))
                 .await;
         }
         Ok(tracks) if tracks.len() == 1 => {
             let url = tracks[0].url.clone();
-            let _ = bot.delete_message(chat_id, status_msg.id).await;
+            let _ = bot.delete_message(chat_id, status_msg_id).await;
             let user_settings = settings.get(user_id);
             process_and_send_media(
                 bot,
@@ -1086,6 +1251,7 @@ async fn handle_soundcloud_search(
                 user_id,
                 &url,
                 true,
+                None,
                 None,
                 user_settings.ym_quality,
                 user_settings.send_as_document,
@@ -1103,7 +1269,7 @@ async fn handle_soundcloud_search(
             let keyboard = build_sc_selection_keyboard(search_id, &tracks, 0);
 
             let _ = bot
-                .edit_message_text(chat_id, status_msg.id, text)
+                .edit_message_text(chat_id, status_msg_id, text)
                 .reply_markup(keyboard)
                 .await;
         }
@@ -1112,7 +1278,7 @@ async fn handle_soundcloud_search(
             let _ = bot
                 .edit_message_text(
                     chat_id,
-                    status_msg.id,
+                    status_msg_id,
                     format!("Ошибка при поиске на SoundCloud: {e}"),
                 )
                 .await;
@@ -1126,23 +1292,35 @@ async fn handle_youtube_search(
     bot: &Bot,
     chat_id: ChatId,
     reply_to: Option<MessageId>,
+    existing_msg_id: Option<MessageId>,
     query: &str,
     cache: &MediaCache,
 ) -> ResponseResult<()> {
-    let mut status_req = bot.send_message(chat_id, format!("🔍 Ищу на YouTube: «{query}»..."));
-    if let Some(msg_id) = reply_to {
-        status_req = status_req.reply_parameters(ReplyParameters::new(msg_id));
-    }
-    let status_msg = status_req.await?;
+    let status_msg_id = if let Some(mid) = existing_msg_id {
+        let _ = bot
+            .edit_message_text(chat_id, mid, format!("🔍 Ищу на YouTube: «{query}»..."))
+            .reply_markup(InlineKeyboardMarkup::default())
+            .await;
+        mid
+    } else {
+        let mut status_req = bot.send_message(chat_id, format!("🔍 Ищу на YouTube: «{query}»..."));
+        if let Some(msg_id) = reply_to {
+            status_req = status_req.reply_parameters(ReplyParameters::new(msg_id));
+        }
+        let status_msg = status_req.await?;
+        status_msg.id
+    };
 
     match search_youtube_videos(query).await {
         Ok(videos) if videos.is_empty() => {
+            let search_id = cache.store_search_query(query.to_string());
             let _ = bot
                 .edit_message_text(
                     chat_id,
-                    status_msg.id,
+                    status_msg_id,
                     format!("По запросу «{query}» ничего не найдено на YouTube."),
                 )
+                .reply_markup(build_empty_search_keyboard(search_id, "yt"))
                 .await;
         }
         Ok(videos) => {
@@ -1153,7 +1331,7 @@ async fn handle_youtube_search(
             let keyboard = build_yt_selection_keyboard(search_id, &videos, 0);
 
             let _ = bot
-                .edit_message_text(chat_id, status_msg.id, text)
+                .edit_message_text(chat_id, status_msg_id, text)
                 .reply_markup(keyboard)
                 .await;
         }
@@ -1162,7 +1340,7 @@ async fn handle_youtube_search(
             let _ = bot
                 .edit_message_text(
                     chat_id,
-                    status_msg.id,
+                    status_msg_id,
                     format!("Ошибка при поиске на YouTube: {e}"),
                 )
                 .await;
@@ -1234,7 +1412,7 @@ pub async fn handle_message(
         None => return Ok(()),
     };
 
-    if let Some(text) = msg.text() {
+    if let Some(text) = msg.text().or_else(|| msg.caption()) {
         let trimmed = text.trim();
 
         if trimmed == "/start"
@@ -1259,11 +1437,25 @@ pub async fn handle_message(
             return Ok(());
         }
 
+        if trimmed == "/clip" || trimmed.starts_with("/clip ") || trimmed.starts_with("/clip@") {
+            if extract_url(trimmed).is_none() {
+                bot.send_message(
+                    msg.chat.id,
+                    "Использование: <code>/clip &lt;url&gt; 01:15-02:30</code> или просто отправь ссылку с таймкодом: <code>&lt;url&gt; 01:15-02:30</code>",
+                )
+                .parse_mode(ParseMode::Html)
+                .reply_parameters(ReplyParameters::new(msg.id))
+                .await?;
+                return Ok(());
+            }
+        }
+
         if let Some(query) = extract_yt_search_query(trimmed) {
             handle_youtube_search(
                 &bot,
                 msg.chat.id,
                 Some(msg.id),
+                None,
                 query,
                 &cache,
             )
@@ -1276,6 +1468,7 @@ pub async fn handle_message(
                 &bot,
                 msg.chat.id,
                 Some(msg.id),
+                None,
                 user_id,
                 query,
                 &config,
@@ -1293,11 +1486,30 @@ pub async fn handle_message(
         }
 
         if let Some(url) = extract_url(trimmed) {
+            let time_range = extract_time_range(trimmed);
+
+            if let Some(ref tr) = time_range {
+                let duration_secs = tr.end_secs.saturating_sub(tr.start_secs);
+                if duration_secs > config.max_duration_secs {
+                    bot.send_message(
+                        msg.chat.id,
+                        format!(
+                            "Длительность выбранного отрезка ({duration_secs} сек.) превышает лимит в {} сек.",
+                            config.max_duration_secs
+                        ),
+                    )
+                    .reply_parameters(ReplyParameters::new(msg.id))
+                    .await?;
+                    return Ok(());
+                }
+            }
+
             let user_settings = settings.get(user_id);
             let audio_only = is_audio_request(url, trimmed, user_settings.audio_only);
 
-            // If user prefers manual quality selection and it is not an audio request or Yandex Music
+            // If user prefers manual quality selection and it is not an audio request, Yandex Music, or a clip
             if !audio_only
+                && time_range.is_none()
                 && user_settings.quality == QualityPreference::AskEveryTime
                 && !crate::providers::yandex::is_yandex_music_url(url)
             {
@@ -1315,6 +1527,7 @@ pub async fn handle_message(
                     url,
                     audio_only,
                     None,
+                    time_range,
                     user_settings.ym_quality,
                     user_settings.send_as_document,
                     &config,
@@ -1324,18 +1537,70 @@ pub async fn handle_message(
                 .await?;
             }
         } else if let Some(query) = extract_search_query(trimmed, msg.chat.is_private()) {
-            handle_yandex_search(
-                &bot,
-                msg.chat.id,
-                Some(msg.id),
-                user_id,
-                query,
-                &config,
-                &queue,
-                &cache,
-                &settings,
-            )
-            .await?;
+            let is_explicit_ym = trimmed.starts_with("/ym")
+                || trimmed.starts_with("/audio")
+                || trimmed.starts_with("/mp3")
+                || trimmed.starts_with("/search");
+            let user_settings = settings.get(user_id);
+            if is_explicit_ym {
+                handle_yandex_search(
+                    &bot,
+                    msg.chat.id,
+                    Some(msg.id),
+                    None,
+                    user_id,
+                    query,
+                    &config,
+                    &queue,
+                    &cache,
+                    &settings,
+                )
+                .await?;
+            } else {
+                match user_settings.default_search {
+                    DefaultSearchProvider::Yandex => {
+                        handle_yandex_search(
+                            &bot,
+                            msg.chat.id,
+                            Some(msg.id),
+                            None,
+                            user_id,
+                            query,
+                            &config,
+                            &queue,
+                            &cache,
+                            &settings,
+                        )
+                        .await?;
+                    }
+                    DefaultSearchProvider::SoundCloud => {
+                        handle_soundcloud_search(
+                            &bot,
+                            msg.chat.id,
+                            Some(msg.id),
+                            None,
+                            user_id,
+                            query,
+                            &config,
+                            &queue,
+                            &cache,
+                            &settings,
+                        )
+                        .await?;
+                    }
+                    DefaultSearchProvider::YouTube => {
+                        handle_youtube_search(
+                            &bot,
+                            msg.chat.id,
+                            Some(msg.id),
+                            None,
+                            query,
+                            &cache,
+                        )
+                        .await?;
+                    }
+                }
+            }
         } else if msg.chat.is_private() {
             // Only send fallback hint in private chats so the bot stays quiet in group chats
             bot.send_message(
@@ -1362,6 +1627,112 @@ pub async fn handle_callback(
         return Ok(());
     };
 
+    if let Some(uid_str) = data.strip_prefix("dl:cancel:") {
+        if let Ok(target_uid) = uid_str.parse::<u64>() {
+            let caller_uid = q.from.id.0;
+            if caller_uid != target_uid {
+                let _ = bot
+                    .answer_callback_query(q.id)
+                    .text("Вы не можете отменить чужую загрузку.")
+                    .await;
+                return Ok(());
+            }
+
+            let was_cancelled = queue.cancel_user_download(UserId(target_uid));
+            if was_cancelled {
+                let _ = bot.answer_callback_query(q.id.clone()).text("Загрузка отменяется...").await;
+                if let Some(msg) = q.regular_message() {
+                    let _ = bot
+                        .edit_message_text(msg.chat.id, msg.id, "❌ Загрузка отменена.")
+                        .await;
+                }
+            } else {
+                let _ = bot.answer_callback_query(q.id.clone()).text("Загрузка уже завершена или не найдена.").await;
+            }
+        }
+        return Ok(());
+    }
+
+    if data == "search:close" {
+        let _ = bot.answer_callback_query(q.id.clone()).await;
+        if let Some(msg) = q.regular_message() {
+            let _ = bot.delete_message(msg.chat.id, msg.id).await;
+        }
+        return Ok(());
+    }
+
+    if let Some(sw_payload) = data.strip_prefix("sw:") {
+        let parts: Vec<&str> = sw_payload.split(':').collect();
+        if parts.len() == 2 {
+            let target = parts[0];
+            let Ok(search_id) = parts[1].parse::<u64>() else {
+                return Ok(());
+            };
+
+            let Some(query) = cache.get_search_query(search_id) else {
+                let _ = bot
+                    .answer_callback_query(q.id)
+                    .text("Поисковый запрос устарел, выполните поиск заново.")
+                    .await;
+                return Ok(());
+            };
+
+            let _ = bot.answer_callback_query(q.id.clone()).await;
+
+            if let Some(msg) = q.regular_message() {
+                let chat_id = msg.chat.id;
+                let reply_to = msg.reply_to_message().map(|m| m.id);
+                let existing_msg_id = Some(msg.id);
+
+                match target {
+                    "ym" => {
+                        handle_yandex_search(
+                            &bot,
+                            chat_id,
+                            reply_to,
+                            existing_msg_id,
+                            q.from.id,
+                            &query,
+                            &config,
+                            &queue,
+                            &cache,
+                            &settings,
+                        )
+                        .await?;
+                    }
+                    "sc" => {
+                        handle_soundcloud_search(
+                            &bot,
+                            chat_id,
+                            reply_to,
+                            existing_msg_id,
+                            q.from.id,
+                            &query,
+                            &config,
+                            &queue,
+                            &cache,
+                            &settings,
+                        )
+                        .await?;
+                    }
+                    "yt" => {
+                        handle_youtube_search(
+                            &bot,
+                            chat_id,
+                            reply_to,
+                            existing_msg_id,
+                            &query,
+                            &cache,
+                        )
+                        .await?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        return Ok(());
+    }
+
     if let Some(sub) = data.strip_prefix("settings:") {
         if sub == "close" {
             let _ = bot.answer_callback_query(q.id.clone()).await;
@@ -1375,6 +1746,7 @@ pub async fn handle_callback(
         let updated = match sub {
             "toggle:quality" | "q:auto" | "q:manual" => settings.toggle_quality(user_id),
             "toggle:ym_quality" | "ym:optimal" | "ym:lossless" => settings.toggle_ym_quality(user_id),
+            "toggle:search" => settings.toggle_default_search(user_id),
             "toggle:audio" => settings.toggle_audio_only(user_id),
             "toggle:document" => settings.toggle_send_as_document(user_id),
             _ => settings.get(user_id),
@@ -1388,6 +1760,11 @@ pub async fn handle_callback(
             "toggle:ym_quality" | "ym:optimal" | "ym:lossless" => match updated.ym_quality {
                 crate::settings::YandexQualityPreference::Optimal => "Яндекс Музыка: AAC 192 kbps ⚡ (быстро)",
                 crate::settings::YandexQualityPreference::Lossless => "Яндекс Музыка: FLAC 💎 (lossless)",
+            },
+            "toggle:search" => match updated.default_search {
+                DefaultSearchProvider::Yandex => "Поиск по умолчанию: 🎶 Яндекс Музыка",
+                DefaultSearchProvider::SoundCloud => "Поиск по умолчанию: ☁️ SoundCloud",
+                DefaultSearchProvider::YouTube => "Поиск по умолчанию: 🎬 YouTube",
             },
             "toggle:audio" => {
                 if updated.audio_only {
@@ -1451,6 +1828,7 @@ pub async fn handle_callback(
                 &url,
                 true,
                 None,
+                None,
                 user_settings.ym_quality,
                 user_settings.send_as_document,
                 &config,
@@ -1504,6 +1882,7 @@ pub async fn handle_callback(
                     &url,
                     false,
                     Some(height),
+                    None,
                     user_settings.ym_quality,
                     user_settings.send_as_document,
                     &config,
@@ -1592,6 +1971,7 @@ pub async fn handle_callback(
                     &url,
                     true,
                     None,
+                    None,
                     user_settings.ym_quality,
                     user_settings.send_as_document,
                     &config,
@@ -1621,6 +2001,7 @@ pub async fn handle_callback(
                     q.from.id,
                     &url,
                     false,
+                    None,
                     None,
                     user_settings.ym_quality,
                     user_settings.send_as_document,
@@ -1712,6 +2093,7 @@ pub async fn handle_callback(
                 &url,
                 true,
                 None,
+                None,
                 user_settings.ym_quality,
                 user_settings.send_as_document,
                 &config,
@@ -1798,6 +2180,7 @@ pub async fn handle_callback(
                     &url,
                     true,
                     None,
+                    None,
                     user_settings.ym_quality,
                     user_settings.send_as_document,
                     &config,
@@ -1827,6 +2210,7 @@ pub async fn handle_callback(
                     q.from.id,
                     &url,
                     false,
+                    None,
                     None,
                     user_settings.ym_quality,
                     user_settings.send_as_document,
@@ -1919,6 +2303,7 @@ pub async fn handle_callback(
                                 &track_url,
                                 true,
                                 None,
+                                None,
                                 user_settings.ym_quality,
                                 user_settings.send_as_document,
                                 &config,
@@ -1979,8 +2364,10 @@ mod tests {
             .collect();
 
         let kb = build_track_selection_keyboard(123, &tracks, 0);
-        // 3 tracks + 1 cancel row
-        assert_eq!(kb.inline_keyboard.len(), 4);
+        // 3 tracks + 1 switch row + 1 cancel row = 5 rows
+        assert_eq!(kb.inline_keyboard.len(), 5);
+        assert_eq!(kb.inline_keyboard[3][0].text, "☁️ SoundCloud");
+        assert_eq!(kb.inline_keyboard[3][1].text, "🎬 YouTube");
     }
 
     #[test]
@@ -1997,8 +2384,8 @@ mod tests {
 
         // Page 0 (out of 3 pages: 5, 5, 2)
         let kb_p0 = build_track_selection_keyboard(123, &tracks, 0);
-        // 5 tracks + 1 nav row + 1 cancel row = 7 rows
-        assert_eq!(kb_p0.inline_keyboard.len(), 7);
+        // 5 tracks + 1 nav row + 1 switch row + 1 cancel row = 8 rows
+        assert_eq!(kb_p0.inline_keyboard.len(), 8);
         let nav_row_p0 = &kb_p0.inline_keyboard[5];
         assert_eq!(nav_row_p0.len(), 2);
         assert_eq!(nav_row_p0[0].text, "1/3");
@@ -2006,7 +2393,7 @@ mod tests {
 
         // Page 1 (middle page)
         let kb_p1 = build_track_selection_keyboard(123, &tracks, 1);
-        assert_eq!(kb_p1.inline_keyboard.len(), 7);
+        assert_eq!(kb_p1.inline_keyboard.len(), 8);
         let nav_row_p1 = &kb_p1.inline_keyboard[5];
         assert_eq!(nav_row_p1.len(), 3);
         assert_eq!(nav_row_p1[0].text, "⬅️ Назад");
@@ -2015,7 +2402,8 @@ mod tests {
 
         // Page 2 (last page, 2 items)
         let kb_p2 = build_track_selection_keyboard(123, &tracks, 2);
-        assert_eq!(kb_p2.inline_keyboard.len(), 4);
+        // 2 tracks + 1 nav row + 1 switch row + 1 cancel row = 5 rows
+        assert_eq!(kb_p2.inline_keyboard.len(), 5);
         let nav_row_p2 = &kb_p2.inline_keyboard[2];
         assert_eq!(nav_row_p2.len(), 2);
         assert_eq!(nav_row_p2[0].text, "⬅️ Назад");
@@ -2055,12 +2443,14 @@ mod tests {
             .collect();
 
         let kb = build_yt_selection_keyboard(42, &videos, 0);
-        // 5 videos + 1 nav row + 1 cancel row = 7 rows
-        assert_eq!(kb.inline_keyboard.len(), 7);
+        // 5 videos + 1 nav row + 1 switch row + 1 cancel row = 8 rows
+        assert_eq!(kb.inline_keyboard.len(), 8);
         let nav_row = &kb.inline_keyboard[5];
         assert_eq!(nav_row.len(), 2);
         assert_eq!(nav_row[0].text, "1/2");
         assert_eq!(nav_row[1].text, "Вперёд ➡️");
+        assert_eq!(kb.inline_keyboard[6][0].text, "🎶 Я.Музыка");
+        assert_eq!(kb.inline_keyboard[6][1].text, "☁️ SoundCloud");
     }
 
     #[test]
@@ -2076,20 +2466,22 @@ mod tests {
             .collect();
 
         let kb = build_sc_selection_keyboard(99, &tracks, 1);
-        // 2 tracks (page 1) + 1 nav row + 1 cancel row = 4 rows
-        assert_eq!(kb.inline_keyboard.len(), 4);
+        // 2 tracks (page 1) + 1 nav row + 1 switch row + 1 cancel row = 5 rows
+        assert_eq!(kb.inline_keyboard.len(), 5);
         let nav_row = &kb.inline_keyboard[2];
         assert_eq!(nav_row.len(), 2);
         assert_eq!(nav_row[0].text, "⬅️ Назад");
         assert_eq!(nav_row[1].text, "2/2");
+        assert_eq!(kb.inline_keyboard[3][0].text, "🎶 Я.Музыка");
+        assert_eq!(kb.inline_keyboard[3][1].text, "🎬 YouTube");
     }
 
     #[test]
     fn test_build_settings_keyboard_and_text() {
         let mut settings = UserSettings::default();
         let kb = build_settings_keyboard(&settings);
-        // 5 rows: Video (1 col), YM (1 col), Audio toggle (1 col), Document toggle (1 col), Close (1 col)
-        assert_eq!(kb.inline_keyboard.len(), 5);
+        // 6 rows: Video (1 col), YM (1 col), Search (1 col), Audio toggle (1 col), Document toggle (1 col), Close (1 col)
+        assert_eq!(kb.inline_keyboard.len(), 6);
         assert_eq!(kb.inline_keyboard[0].len(), 1);
         assert_eq!(kb.inline_keyboard[0][0].text, "🎬 Качество видео: Авто ⚡");
 
@@ -2097,16 +2489,20 @@ mod tests {
         assert_eq!(kb.inline_keyboard[1][0].text, "🎶 Я.Музыка: AAC 192k ⚡");
 
         assert_eq!(kb.inline_keyboard[2].len(), 1);
-        assert_eq!(kb.inline_keyboard[2][0].text, "🎵 Только аудио: ВЫКЛ ❌");
+        assert_eq!(kb.inline_keyboard[2][0].text, "🔍 Поиск в ЛС: Я.Музыка 🎶");
 
         assert_eq!(kb.inline_keyboard[3].len(), 1);
-        assert_eq!(kb.inline_keyboard[3][0].text, "📎 Отправка файлом: ВЫКЛ ❌");
+        assert_eq!(kb.inline_keyboard[3][0].text, "🎵 Только аудио: ВЫКЛ ❌");
 
         assert_eq!(kb.inline_keyboard[4].len(), 1);
-        assert_eq!(kb.inline_keyboard[4][0].text, "✖️ Закрыть");
+        assert_eq!(kb.inline_keyboard[4][0].text, "📎 Отправка файлом: ВЫКЛ ❌");
+
+        assert_eq!(kb.inline_keyboard[5].len(), 1);
+        assert_eq!(kb.inline_keyboard[5][0].text, "✖️ Закрыть");
 
         settings.quality = QualityPreference::AskEveryTime;
         settings.ym_quality = crate::settings::YandexQualityPreference::Lossless;
+        settings.default_search = DefaultSearchProvider::SoundCloud;
         settings.audio_only = true;
         settings.send_as_document = true;
         let kb_custom = build_settings_keyboard(&settings);
@@ -2115,14 +2511,43 @@ mod tests {
         assert_eq!(kb_custom.inline_keyboard[1].len(), 1);
         assert_eq!(kb_custom.inline_keyboard[1][0].text, "🎶 Я.Музыка: FLAC 💎");
         assert_eq!(kb_custom.inline_keyboard[2].len(), 1);
-        assert_eq!(kb_custom.inline_keyboard[2][0].text, "🎵 Только аудио: ВКЛ ✅");
+        assert_eq!(kb_custom.inline_keyboard[2][0].text, "🔍 Поиск в ЛС: SoundCloud ☁️");
         assert_eq!(kb_custom.inline_keyboard[3].len(), 1);
-        assert_eq!(kb_custom.inline_keyboard[3][0].text, "📎 Отправка файлом: ВКЛ ✅");
+        assert_eq!(kb_custom.inline_keyboard[3][0].text, "🎵 Только аудио: ВКЛ ✅");
+        assert_eq!(kb_custom.inline_keyboard[4].len(), 1);
+        assert_eq!(kb_custom.inline_keyboard[4][0].text, "📎 Отправка файлом: ВКЛ ✅");
 
         let text = build_settings_text(&settings);
         assert!(text.contains("Вручную"));
         assert!(text.contains("FLAC"));
+        assert!(text.contains("SoundCloud"));
         assert!(text.contains("Включён"));
         assert!(text.contains("Включена"));
+    }
+
+    #[test]
+    fn test_build_empty_search_keyboard() {
+        let kb_ym = build_empty_search_keyboard(77, "ym");
+        assert_eq!(kb_ym.inline_keyboard.len(), 2);
+        assert_eq!(kb_ym.inline_keyboard[0].len(), 2);
+        assert_eq!(kb_ym.inline_keyboard[0][0].text, "☁️ SoundCloud");
+        assert_eq!(kb_ym.inline_keyboard[0][1].text, "🎬 YouTube");
+        assert_eq!(kb_ym.inline_keyboard[1][0].text, "❌ Закрыть");
+
+        let kb_yt = build_empty_search_keyboard(77, "yt");
+        assert_eq!(kb_yt.inline_keyboard[0].len(), 2);
+        assert_eq!(kb_yt.inline_keyboard[0][0].text, "🎶 Я.Музыка");
+        assert_eq!(kb_yt.inline_keyboard[0][1].text, "☁️ SoundCloud");
+    }
+
+    #[test]
+    fn test_build_cancel_download_keyboard() {
+        let kb = build_cancel_download_keyboard(UserId(12345));
+        assert_eq!(kb.inline_keyboard.len(), 1);
+        if let teloxide::types::InlineKeyboardButtonKind::CallbackData(ref data) = kb.inline_keyboard[0][0].kind {
+            assert_eq!(data, "dl:cancel:12345");
+        } else {
+            panic!("Expected CallbackData");
+        }
     }
 }

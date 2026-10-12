@@ -356,6 +356,7 @@ pub async fn download_yandex_track(
         .arg(output_dir)
         .arg("--url")
         .arg(url)
+        .kill_on_drop(true)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

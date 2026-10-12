@@ -13,12 +13,101 @@ pub struct AudioTrack {
     pub path: PathBuf,
     pub title: Option<String>,
     pub performer: Option<String>,
+    pub duration_secs: Option<u32>,
     pub cover_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoFile {
+    pub path: PathBuf,
+    pub title: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub duration_secs: Option<u32>,
+    pub thumbnail_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimeRange {
+    pub start_secs: u64,
+    pub end_secs: u64,
+    pub raw_label: String,
 }
 
 pub enum MediaOutput {
     Audio(Vec<AudioTrack>),
-    Video(PathBuf),
+    Video(VideoFile),
+}
+
+/// Parses timestamp strings such as "10", "01:25", "1:05:30" into total seconds.
+pub fn parse_timestamp(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = s.split(':').collect();
+    match parts.len() {
+        1 => parts[0].parse::<u64>().ok(),
+        2 => {
+            let mins = parts[0].parse::<u64>().ok()?;
+            let secs = parts[1].parse::<u64>().ok()?;
+            if secs < 60 {
+                Some(mins * 60 + secs)
+            } else {
+                None
+            }
+        }
+        3 => {
+            let hours = parts[0].parse::<u64>().ok()?;
+            let mins = parts[1].parse::<u64>().ok()?;
+            let secs = parts[2].parse::<u64>().ok()?;
+            if mins < 60 && secs < 60 {
+                Some(hours * 3600 + mins * 60 + secs)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Extracts a time range (e.g. 01:15-02:30 or 1:15 - 2:30) from the user text.
+pub fn extract_time_range(text: &str) -> Option<TimeRange> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    for sep in ['-', '–', '—'] {
+        for word in &words {
+            if word.starts_with("http://") || word.starts_with("https://") {
+                continue;
+            }
+            if let Some((left, right)) = word.split_once(sep) {
+                if let (Some(s), Some(e)) = (parse_timestamp(left), parse_timestamp(right)) {
+                    if e > s {
+                        return Some(TimeRange {
+                            start_secs: s,
+                            end_secs: e,
+                            raw_label: format!("{left}-{right}"),
+                        });
+                    }
+                }
+            }
+        }
+        for (i, &w) in words.iter().enumerate() {
+            if (w == "-" || w == "–" || w == "—") && i > 0 && i + 1 < words.len() {
+                let left = words[i - 1];
+                let right = words[i + 1];
+                if let (Some(s), Some(e)) = (parse_timestamp(left), parse_timestamp(right)) {
+                    if e > s {
+                        return Some(TimeRange {
+                            start_secs: s,
+                            end_secs: e,
+                            raw_label: format!("{left}-{right}"),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Extracts the first HTTP/HTTPS URL found in the message text.
@@ -135,9 +224,15 @@ pub fn process_audio_metadata(file_path: &Path) -> AudioTrack {
     let cover_path = file_path.with_extension("jpg");
     let mut performer = None;
     let mut title = None;
+    let mut duration_secs = None;
     let mut has_cover = false;
 
     if let Ok(tagged_file) = Probe::open(file_path).and_then(|p| p.read()) {
+        let dur = tagged_file.properties().duration().as_secs();
+        if dur > 0 {
+            duration_secs = Some(dur as u32);
+        }
+
         if let Some(tag) = tagged_file
             .primary_tag()
             .or_else(|| tagged_file.first_tag())
@@ -159,10 +254,23 @@ pub fn process_audio_metadata(file_path: &Path) -> AudioTrack {
         }
     }
 
+    if title.is_none() {
+        if let Some(parent) = file_path.parent() {
+            let title_file = parent.join("title.txt");
+            if let Ok(t) = std::fs::read_to_string(title_file) {
+                let trimmed = t.trim();
+                if !trimmed.is_empty() {
+                    title = Some(trimmed.to_string());
+                }
+            }
+        }
+    }
+
     AudioTrack {
         path: file_path.to_path_buf(),
         title,
         performer,
+        duration_secs,
         cover_path: if has_cover { Some(cover_path) } else { None },
     }
 }
@@ -174,7 +282,7 @@ async fn process_tracks_blocking(files: Vec<PathBuf>) -> Vec<AudioTrack> {
             .into_iter()
             .map(|f| process_audio_metadata(&f))
             .collect()
-    })
+        })
     .await
     .unwrap_or_default()
 }
@@ -218,10 +326,11 @@ pub async fn fetch_media(
     url: &str,
     audio_only: bool,
     max_height: Option<u16>,
+    time_range: Option<&TimeRange>,
     ym_quality: crate::settings::YandexQualityPreference,
     temp_dir: &Path,
     config: &Config,
-    progress: & std::sync::Arc<std::sync::atomic::AtomicU8>,
+    progress: &std::sync::Arc<std::sync::atomic::AtomicU8>,
 ) -> Result<MediaOutput, String> {
     if is_yandex_music_url(url) {
         let token = config
@@ -238,18 +347,32 @@ pub async fn fetch_media(
         return Ok(MediaOutput::Audio(tracks));
     }
 
-    let file_path = download_media(url, audio_only, max_height, temp_dir, config, progress).await?;
+    let file_path = download_media(url, audio_only, max_height, time_range, temp_dir, config, progress).await?;
 
     if audio_only {
         let tracks = process_tracks_blocking(vec![file_path]).await;
         Ok(MediaOutput::Audio(tracks))
     } else {
-        Ok(MediaOutput::Video(file_path))
+        let (width, height, duration_secs, thumbnail_path) = probe_video_metadata(&file_path).await;
+        let title = tokio::fs::read_to_string(temp_dir.join("title.txt"))
+            .await
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        Ok(MediaOutput::Video(VideoFile {
+            path: file_path,
+            title,
+            width,
+            height,
+            duration_secs,
+            thumbnail_path,
+        }))
     }
 }
 
-/// Probes video file dimensions (width, height) using ffprobe.
-pub async fn get_video_dimensions(path: &Path) -> Option<(u32, u32)> {
+/// Probes video dimensions, duration, and extracts a thumbnail frame (max 320x320) via ffprobe and ffmpeg.
+pub async fn probe_video_metadata(path: &Path) -> (Option<u32>, Option<u32>, Option<u32>, Option<PathBuf>) {
     let output = tokio::process::Command::new("ffprobe")
         .args([
             "-v",
@@ -257,28 +380,92 @@ pub async fn get_video_dimensions(path: &Path) -> Option<(u32, u32)> {
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=width,height",
+            "stream=width,height,duration:format=duration",
             "-of",
-            "csv=s=x:p=0",
+            "json",
         ])
         .arg(path)
         .output()
         .await
-        .ok()?;
+        .ok();
 
-    if !output.status.success() {
-        return None;
+    let mut width = None;
+    let mut height = None;
+    let mut duration_secs = None;
+
+    if let Some(out) = output {
+        if out.status.success() {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                if let Some(stream) = val.pointer("/streams/0") {
+                    width = stream.get("width").and_then(|v| v.as_u64()).map(|v| v as u32);
+                    height = stream.get("height").and_then(|v| v.as_u64()).map(|v| v as u32);
+                    if let Some(d_str) = stream.get("duration").and_then(|v| v.as_str()) {
+                        if let Ok(d) = d_str.parse::<f64>() {
+                            if d > 0.0 {
+                                duration_secs = Some(d.round() as u32);
+                            }
+                        }
+                    }
+                }
+                if duration_secs.is_none() {
+                    if let Some(d_str) = val.pointer("/format/duration").and_then(|v| v.as_str()) {
+                        if let Ok(d) = d_str.parse::<f64>() {
+                            if d > 0.0 {
+                                duration_secs = Some(d.round() as u32);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    let out_str = String::from_utf8_lossy(&output.stdout);
-    let mut parts = out_str.trim().split('x');
-    let width: u32 = parts.next()?.trim().parse().ok()?;
-    let height: u32 = parts.next()?.trim().parse().ok()?;
+    let thumb_path = path.with_extension("thumb.jpg");
+    let ss_time = match duration_secs {
+        Some(d) if d > 3 => "1",
+        Some(_) => "0",
+        None => "1",
+    };
 
-    if width > 0 && height > 0 {
-        Some((width, height))
+    let thumb_res = tokio::process::Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-y",
+            "-ss",
+            ss_time,
+            "-i",
+        ])
+        .arg(path)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale='min(320,iw)':'min(320,ih)':force_original_aspect_ratio=decrease",
+            "-q:v",
+            "3",
+        ])
+        .arg(&thumb_path)
+        .kill_on_drop(true)
+        .status()
+        .await;
+
+    let final_thumb = if thumb_res.map(|s| s.success()).unwrap_or(false) && thumb_path.exists() {
+        Some(thumb_path)
     } else {
         None
+    };
+
+    (width, height, duration_secs, final_thumb)
+}
+
+/// Probes video file dimensions (width, height) using ffprobe.
+#[allow(dead_code)]
+pub async fn get_video_dimensions(path: &Path) -> Option<(u32, u32)> {
+    let (w, h, _, _) = probe_video_metadata(path).await;
+    match (w, h) {
+        (Some(width), Some(height)) if width > 0 && height > 0 => Some((width, height)),
+        _ => None,
     }
 }
 
@@ -359,6 +546,33 @@ mod tests {
             format_progress_bar("📤 Отправка", 100),
             "📤 Отправка: 100%\n[██████████]"
         );
+    }
+
+    #[test]
+    fn test_parse_timestamp() {
+        assert_eq!(parse_timestamp("45"), Some(45));
+        assert_eq!(parse_timestamp("01:15"), Some(75));
+        assert_eq!(parse_timestamp("1:02:03"), Some(3723));
+        assert_eq!(parse_timestamp("invalid"), None);
+        assert_eq!(parse_timestamp("01:75"), None);
+    }
+
+    #[test]
+    fn test_extract_time_range() {
+        let r1 = extract_time_range("https://youtu.be/123 01:15-02:30").unwrap();
+        assert_eq!(r1.start_secs, 75);
+        assert_eq!(r1.end_secs, 150);
+
+        let r2 = extract_time_range("/clip https://youtu.be/123 1:00 - 2:00").unwrap();
+        assert_eq!(r2.start_secs, 60);
+        assert_eq!(r2.end_secs, 120);
+
+        let r3 = extract_time_range("https://youtu.be/123 00:01:15–00:02:30").unwrap();
+        assert_eq!(r3.start_secs, 75);
+        assert_eq!(r3.end_secs, 150);
+
+        assert!(extract_time_range("https://youtu.be/123").is_none());
+        assert!(extract_time_range("https://youtu.be/123 02:00-01:00").is_none());
     }
 }
 

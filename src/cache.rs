@@ -60,6 +60,81 @@ pub struct MediaCache {
     storage_path: Option<PathBuf>,
 }
 
+/// Normalizes media URLs to increase cache hit rate across clients and variations.
+pub fn normalize_media_url(raw_url: &str) -> String {
+    let trimmed = raw_url.trim();
+    let Ok(mut parsed) = reqwest::Url::parse(trimmed) else {
+        return trimmed.to_string();
+    };
+
+    let host = parsed.host_str().unwrap_or("").to_lowercase();
+
+    // 1. YouTube normalization
+    if host == "youtu.be" {
+        let video_id = parsed.path().trim_start_matches('/');
+        if !video_id.is_empty() {
+            return format!("https://www.youtube.com/watch?v={video_id}");
+        }
+    } else if host.contains("youtube.com") {
+        if parsed.path().starts_with("/shorts/") {
+            let video_id = parsed.path().trim_start_matches("/shorts/").trim_end_matches('/');
+            if !video_id.is_empty() {
+                return format!("https://www.youtube.com/watch?v={video_id}");
+            }
+        } else if parsed.path().starts_with("/watch") {
+            let mut video_id = None;
+            for (k, v) in parsed.query_pairs() {
+                if k == "v" {
+                    video_id = Some(v.into_owned());
+                    break;
+                }
+            }
+            if let Some(id) = video_id {
+                return format!("https://www.youtube.com/watch?v={id}");
+            }
+        }
+    }
+
+    // 2. Yandex Music normalization
+    if host.contains("music.yandex.") || host.contains("yandex.ru") {
+        let path = parsed.path();
+        if let Some(idx) = path.find("/track/") {
+            let track_part = &path[idx + "/track/".len()..];
+            let tid = track_part.split('/').next().unwrap_or("");
+            if !tid.is_empty() && tid.chars().all(|c| c.is_ascii_digit()) {
+                return format!("https://music.yandex.ru/track/{tid}");
+            }
+        }
+    }
+
+    // 3. Strip common tracking query params
+    let tracking_params = [
+        "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+        "si", "feature", "igsh", "igshid", "_t", "_r", "sender_device",
+        "is_from_webapp", "share_id", "source", "ref", "fbclid",
+    ];
+
+    let query_pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(k, _)| !tracking_params.contains(&k.as_ref()))
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+
+    parsed.set_query(None);
+    if !query_pairs.is_empty() {
+        let mut pairs_mut = parsed.query_pairs_mut();
+        for (k, v) in &query_pairs {
+            pairs_mut.append_pair(k, v);
+        }
+    }
+
+    let mut result = parsed.to_string();
+    if result.ends_with('/') && !result.ends_with("://") {
+        result.pop();
+    }
+    result
+}
+
 #[derive(Default)]
 struct CacheState {
     media: HashMap<(String, bool, Option<u16>, bool), CacheEntry>,
@@ -76,6 +151,8 @@ struct CacheState {
     yt_search_order: VecDeque<u64>,
     sc_searches: HashMap<u64, (String, Vec<SoundcloudTrackInfo>)>,
     sc_search_order: VecDeque<u64>,
+    search_queries: HashMap<u64, String>,
+    search_query_order: VecDeque<u64>,
 }
 
 impl MediaCache {
@@ -193,8 +270,11 @@ impl MediaCache {
                         let _ = std::fs::create_dir_all(parent);
                     }
                 }
-                if let Err(e) = std::fs::write(path, json) {
-                    log::error!("Failed to persist MediaCache to {:?}: {}", path, e);
+                let tmp_path = path.with_extension("tmp");
+                if let Err(e) = std::fs::write(&tmp_path, json) {
+                    log::error!("Failed to write temporary MediaCache to {:?}: {}", tmp_path, e);
+                } else if let Err(e) = std::fs::rename(&tmp_path, path) {
+                    log::error!("Failed to atomic rename MediaCache to {:?}: {}", path, e);
                 }
             }
             Err(e) => log::error!("Failed to serialize MediaCache: {}", e),
@@ -203,10 +283,11 @@ impl MediaCache {
 
     /// Retrieves cached Telegram `FileId`(s) for the given URL, mode (`audio_only`), resolution (`max_height`), and format (`send_as_document`).
     pub fn get(&self, url: &str, audio_only: bool, max_height: Option<u16>, send_as_document: bool) -> Option<CachedMedia> {
+        let normalized = normalize_media_url(url);
         let state = self.inner.lock().ok()?;
         state
             .media
-            .get(&(url.to_string(), audio_only, max_height, send_as_document))
+            .get(&(normalized, audio_only, max_height, send_as_document))
             .map(|entry| entry.media.clone())
     }
 
@@ -221,8 +302,9 @@ impl MediaCache {
         media: CachedMedia,
         size_bytes: u64,
     ) {
+        let normalized = normalize_media_url(url);
         if let Ok(mut state) = self.inner.lock() {
-            let key = (url.to_string(), audio_only, max_height, send_as_document);
+            let key = (normalized, audio_only, max_height, send_as_document);
 
             if let Some(old) = state.media.remove(&key) {
                 state.total_bytes = state.total_bytes.saturating_sub(old.size_bytes);
@@ -252,8 +334,9 @@ impl MediaCache {
 
     /// Registers a URL and returns a compact numeric ID suitable for Telegram's 64-byte `callback_data`.
     pub fn register_url(&self, url: &str) -> u64 {
+        let normalized = normalize_media_url(url);
         if let Ok(mut state) = self.inner.lock() {
-            if let Some(&id) = state.url_to_id.get(url) {
+            if let Some(&id) = state.url_to_id.get(&normalized) {
                 return id;
             }
 
@@ -265,9 +348,9 @@ impl MediaCache {
             }
 
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            state.url_to_id.insert(url.to_string(), id);
-            state.id_to_url.insert(id, url.to_string());
-            state.url_order.push_back((id, url.to_string()));
+            state.url_to_id.insert(normalized.clone(), id);
+            state.id_to_url.insert(id, normalized.clone());
+            state.url_order.push_back((id, normalized));
             self.save_locked(&state);
             id
         } else {
@@ -281,6 +364,44 @@ impl MediaCache {
         state.id_to_url.get(&id).cloned()
     }
 
+    /// Stores a raw search query and returns a compact search ID.
+    pub fn store_search_query(&self, query: String) -> u64 {
+        if let Ok(mut state) = self.inner.lock() {
+            while state.search_query_order.len() >= 500 {
+                if let Some(old_id) = state.search_query_order.pop_front() {
+                    state.search_queries.remove(&old_id);
+                }
+            }
+            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            state.search_query_order.push_back(id);
+            state.search_queries.insert(id, query);
+            id
+        } else {
+            0
+        }
+    }
+
+    /// Retrieves a search query by search ID across any registered search cache.
+    pub fn get_search_query(&self, id: u64) -> Option<String> {
+        let state = self.inner.lock().ok()?;
+        if let Some(q) = state.search_queries.get(&id) {
+            return Some(q.clone());
+        }
+        if let Some((q, _)) = state.ym_searches.get(&id) {
+            return Some(q.clone());
+        }
+        if let Some((q, _)) = state.sc_searches.get(&id) {
+            return Some(q.clone());
+        }
+        if let Some((q, _)) = state.yt_searches.get(&id) {
+            return Some(q.clone());
+        }
+        if let Some((q, _)) = state.ph_searches.get(&id) {
+            return Some(q.clone());
+        }
+        None
+    }
+
     /// Stores Pornhub search results and returns a compact search ID.
     pub fn store_ph_search(&self, query: String, videos: Vec<PornhubVideoInfo>) -> u64 {
         if let Ok(mut state) = self.inner.lock() {
@@ -291,6 +412,7 @@ impl MediaCache {
             }
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
             state.ph_search_order.push_back(id);
+            state.search_queries.insert(id, query.clone());
             state.ph_searches.insert(id, (query, videos));
             id
         } else {
@@ -314,6 +436,7 @@ impl MediaCache {
             }
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
             state.ym_search_order.push_back(id);
+            state.search_queries.insert(id, query.clone());
             state.ym_searches.insert(id, (query, tracks));
             id
         } else {
@@ -337,6 +460,7 @@ impl MediaCache {
             }
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
             state.yt_search_order.push_back(id);
+            state.search_queries.insert(id, query.clone());
             state.yt_searches.insert(id, (query, videos));
             id
         } else {
@@ -360,6 +484,7 @@ impl MediaCache {
             }
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
             state.sc_search_order.push_back(id);
+            state.search_queries.insert(id, query.clone());
             state.sc_searches.insert(id, (query, tracks));
             id
         } else {
@@ -491,5 +616,32 @@ mod tests {
         assert_eq!(query, "sc query");
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, "sc123");
+    }
+
+    #[test]
+    fn test_normalize_media_url() {
+        assert_eq!(
+            normalize_media_url("https://youtu.be/dQw4w9WgXcQ?si=abc12345"),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        );
+        assert_eq!(
+            normalize_media_url("https://www.youtube.com/shorts/dQw4w9WgXcQ?feature=share"),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        );
+        assert_eq!(
+            normalize_media_url("https://music.yandex.ru/album/123/track/456?utm_source=telegram"),
+            "https://music.yandex.ru/track/456"
+        );
+        assert_eq!(
+            normalize_media_url("https://soundcloud.com/artist/track?si=abc&utm_medium=sharing"),
+            "https://soundcloud.com/artist/track"
+        );
+    }
+
+    #[test]
+    fn test_search_query_retrieval() {
+        let cache = MediaCache::new();
+        let q_id = cache.store_search_query("Bohemian Rhapsody".to_string());
+        assert_eq!(cache.get_search_query(q_id).as_deref(), Some("Bohemian Rhapsody"));
     }
 }

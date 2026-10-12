@@ -1,7 +1,7 @@
 use crate::providers::pornhub::is_pornhub_url;
 use crate::providers::soundcloud::is_soundcloud_url;
 use crate::providers::yandex::is_yandex_music_url;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use teloxide::types::UserId;
@@ -62,15 +62,17 @@ impl Service {
     }
 }
 
+use tokio::sync::watch;
+
 pub struct UserGuard {
     user_id: UserId,
-    active_users: Arc<Mutex<HashSet<UserId>>>,
+    active_users: Arc<Mutex<HashMap<UserId, watch::Sender<bool>>>>,
 }
 
 impl Drop for UserGuard {
     fn drop(&mut self) {
-        if let Ok(mut set) = self.active_users.lock() {
-            set.remove(&self.user_id);
+        if let Ok(mut map) = self.active_users.lock() {
+            map.remove(&self.user_id);
         }
     }
 }
@@ -97,7 +99,7 @@ pub struct QueueManager {
     domain_semaphores: Arc<HashMap<Service, Arc<Semaphore>>>,
     domain_concurrency: usize,
     domain_waiters: Arc<HashMap<Service, Arc<AtomicUsize>>>,
-    active_users: Arc<Mutex<HashSet<UserId>>>,
+    active_users: Arc<Mutex<HashMap<UserId, watch::Sender<bool>>>>,
 }
 
 impl QueueManager {
@@ -117,22 +119,38 @@ impl QueueManager {
             domain_semaphores: Arc::new(semaphores),
             domain_concurrency,
             domain_waiters: Arc::new(waiters),
-            active_users: Arc::new(Mutex::new(HashSet::new())),
+            active_users: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// Tries to acquire a download lock for a user.
-    /// Returns `Some(UserGuard)` if allowed, or `None` if the user already has an active task.
-    pub fn try_lock_user(&self, user_id: UserId) -> Option<UserGuard> {
+    /// Returns `Some((UserGuard, watch::Receiver<bool>))` if allowed, or `None` if the user already has an active task.
+    pub fn try_lock_user(&self, user_id: UserId) -> Option<(UserGuard, watch::Receiver<bool>)> {
         let mut users = self.active_users.lock().ok()?;
-        if users.insert(user_id) {
-            Some(UserGuard {
+        if users.contains_key(&user_id) {
+            return None;
+        }
+        let (tx, rx) = watch::channel(false);
+        users.insert(user_id, tx);
+        Some((
+            UserGuard {
                 user_id,
                 active_users: Arc::clone(&self.active_users),
-            })
-        } else {
-            None
+            },
+            rx,
+        ))
+    }
+
+    /// Signals cancellation for an ongoing user download.
+    /// Returns `true` if an active download for `user_id` was found and notified.
+    pub fn cancel_user_download(&self, user_id: UserId) -> bool {
+        if let Ok(users) = self.active_users.lock() {
+            if let Some(tx) = users.get(&user_id) {
+                let _ = tx.send(true);
+                return true;
+            }
         }
+        false
     }
 
     /// Registers the request in the service queue and returns the service type, queue position,
@@ -207,5 +225,22 @@ mod tests {
 
         let _g1 = q.acquire(s1, w1).await;
         let _g2 = q.acquire(s2, w2).await;
+    }
+
+    #[tokio::test]
+    async fn test_user_lock_and_cancellation() {
+        let q = QueueManager::new(3);
+        let uid = UserId(42);
+
+        let (guard, rx) = q.try_lock_user(uid).expect("first lock should succeed");
+        assert_eq!(*rx.borrow(), false);
+        assert!(q.try_lock_user(uid).is_none(), "second lock should fail while active");
+
+        let cancelled = q.cancel_user_download(uid);
+        assert!(cancelled);
+        assert_eq!(*rx.borrow(), true);
+
+        drop(guard);
+        assert!(q.try_lock_user(uid).is_some(), "after guard drop, user can lock again");
     }
 }

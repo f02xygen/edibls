@@ -19,6 +19,14 @@ pub enum YandexQualityPreference {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DefaultSearchProvider {
+    #[default]
+    Yandex,
+    SoundCloud,
+    YouTube,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct UserSettings {
     #[serde(default)]
     pub quality: QualityPreference,
@@ -28,6 +36,8 @@ pub struct UserSettings {
     pub ym_quality: YandexQualityPreference,
     #[serde(default)]
     pub send_as_document: bool, // If true, media is sent as document without Telegram compression
+    #[serde(default)]
+    pub default_search: DefaultSearchProvider,
 }
 
 #[derive(Clone)]
@@ -133,6 +143,20 @@ impl UserSettingsStore {
         updated
     }
 
+    pub fn toggle_default_search(&self, user_id: UserId) -> UserSettings {
+        let mut guard = self.inner.lock().unwrap();
+        let entry = guard.entry(user_id.0).or_default();
+        entry.default_search = match entry.default_search {
+            DefaultSearchProvider::Yandex => DefaultSearchProvider::SoundCloud,
+            DefaultSearchProvider::SoundCloud => DefaultSearchProvider::YouTube,
+            DefaultSearchProvider::YouTube => DefaultSearchProvider::Yandex,
+        };
+        let updated = *entry;
+        drop(guard);
+        self.save();
+        updated
+    }
+
     fn save(&self) {
         let guard = self.inner.lock().unwrap();
         match serde_json::to_string_pretty(&*guard) {
@@ -142,8 +166,11 @@ impl UserSettingsStore {
                         let _ = std::fs::create_dir_all(parent);
                     }
                 }
-                if let Err(e) = std::fs::write(&self.storage_path, json) {
-                    log::error!("Failed to persist settings to {:?}: {}", self.storage_path, e);
+                let tmp_path = self.storage_path.with_extension("tmp");
+                if let Err(e) = std::fs::write(&tmp_path, json) {
+                    log::error!("Failed to write temporary settings to {:?}: {}", tmp_path, e);
+                } else if let Err(e) = std::fs::rename(&tmp_path, &self.storage_path) {
+                    log::error!("Failed to atomic rename settings to {:?}: {}", self.storage_path, e);
                 }
             }
             Err(e) => log::error!("Failed to serialize settings: {}", e),
@@ -167,6 +194,7 @@ mod tests {
             audio_only: false,
             ym_quality: YandexQualityPreference::Optimal,
             send_as_document: false,
+            default_search: DefaultSearchProvider::Yandex,
         });
 
         let updated = store.toggle_audio_only(uid);
@@ -184,11 +212,17 @@ mod tests {
         assert!(updated_doc.send_as_document);
         assert_eq!(store.get(uid).send_as_document, true);
 
+        let updated_search = store.toggle_default_search(uid);
+        assert_eq!(updated_search.default_search, DefaultSearchProvider::SoundCloud);
+        let updated_search_yt = store.toggle_default_search(uid);
+        assert_eq!(updated_search_yt.default_search, DefaultSearchProvider::YouTube);
+
         // Reload store from same file
         let reloaded = UserSettingsStore::load_or_create(tmp.path());
         assert_eq!(reloaded.get(uid).quality, QualityPreference::AskEveryTime);
         assert_eq!(reloaded.get(uid).audio_only, true);
         assert_eq!(reloaded.get(uid).ym_quality, YandexQualityPreference::Lossless);
         assert_eq!(reloaded.get(uid).send_as_document, true);
+        assert_eq!(reloaded.get(uid).default_search, DefaultSearchProvider::YouTube);
     }
 }

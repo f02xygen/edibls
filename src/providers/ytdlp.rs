@@ -15,6 +15,7 @@ pub async fn download_media(
     url: &str,
     audio_only: bool,
     max_height: Option<u16>,
+    time_range: Option<&crate::media::TimeRange>,
     temp_dir: &Path,
     config: &Config,
     progress: &Arc<AtomicU8>,
@@ -39,7 +40,7 @@ pub async fn download_media(
             );
             progress.store(0, Ordering::Relaxed);
         }
-        match run_ytdlp_once(url, audio_only, height_opt, temp_dir, config, progress).await {
+        match run_ytdlp_once(url, audio_only, height_opt, time_range, temp_dir, config, progress).await {
             Ok(path) => return Ok(path),
             Err((err_msg, is_filesize_exceeded)) => {
                 last_err = err_msg;
@@ -57,14 +58,16 @@ async fn run_ytdlp_once(
     url: &str,
     audio_only: bool,
     max_height: Option<u16>,
+    time_range: Option<&crate::media::TimeRange>,
     temp_dir: &Path,
     config: &Config,
     progress: &Arc<AtomicU8>,
 ) -> Result<PathBuf, (String, bool)> {
     log::info!(
-        "Processing URL (audio_only={}, max_height={:?}): {}",
+        "Processing URL (audio_only={}, max_height={:?}, time_range={:?}): {}",
         audio_only,
         max_height,
+        time_range,
         url
     );
 
@@ -86,8 +89,6 @@ async fn run_ytdlp_once(
     cmd.args([
         "--max-filesize",
         &max_filesize_str,
-        "--match-filter",
-        &match_filter,
         "--concurrent-fragments",
         "8",
         "--http-chunk-size",
@@ -104,6 +105,16 @@ async fn run_ytdlp_once(
         "--progress-template",
         "download:EDIBLS_PROG:%(progress._percent_str)s",
     ]);
+
+    if let Some(tr) = time_range {
+        cmd.args([
+            "--download-sections",
+            &format!("*{}-{}", tr.start_secs, tr.end_secs),
+            "--force-keyframes-at-cuts",
+        ]);
+    } else {
+        cmd.args(["--match-filter", &match_filter]);
+    }
 
     // Build combined youtube extractor args
     if let Some(pot_url) = &config.youtube_pot_url {
@@ -180,13 +191,21 @@ async fn run_ytdlp_once(
     let _ = tokio::fs::remove_file(&filepath_record).await;
     let filepath_record_str = filepath_record.to_string_lossy();
 
+    let title_record = temp_dir.join("title.txt");
+    let _ = tokio::fs::remove_file(&title_record).await;
+    let title_record_str = title_record.to_string_lossy();
+
     let mut child = cmd
         .arg("-o")
         .arg(&*output_template_str)
         .arg("--print-to-file")
         .arg("after_move:filepath")
         .arg(&*filepath_record_str)
+        .arg("--print-to-file")
+        .arg("after_move:title")
+        .arg(&*title_record_str)
         .arg(url)
+        .kill_on_drop(true)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

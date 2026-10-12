@@ -521,18 +521,22 @@ pub async fn process_and_send_media(
     };
 
     let dl_progress = Arc::new(AtomicU8::new(0));
+    let dl_shown_pct = Arc::new(AtomicU8::new(0));
     let dl_bot = bot.clone();
     let dl_msg_id = status_msg.id;
     let dl_prog_clone = Arc::clone(&dl_progress);
+    let dl_shown_clone = Arc::clone(&dl_shown_pct);
     let dl_updater = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(800));
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(400));
         interval.tick().await;
         let mut last_pct = 0u8;
         loop {
             interval.tick().await;
-            let pct = dl_prog_clone.load(Ordering::Relaxed);
+            let target_pct = dl_prog_clone.load(Ordering::Relaxed);
+            let pct = target_pct.min(last_pct.saturating_add(35)).min(99);
             if pct != last_pct {
                 last_pct = pct;
+                dl_shown_clone.store(pct, Ordering::Relaxed);
                 let _ = dl_bot
                     .edit_message_text(chat_id, dl_msg_id, format_progress_bar("📥 Скачивание", pct))
                     .await;
@@ -555,6 +559,11 @@ pub async fn process_and_send_media(
 
     let final_dl_pct = dl_progress.load(Ordering::Relaxed);
     if final_dl_pct > 0 {
+        if dl_shown_pct.load(Ordering::Relaxed) == 0 {
+            let _ = bot
+                .edit_message_text(chat_id, status_msg.id, format_progress_bar("📥 Скачивание", 50))
+                .await;
+        }
         let _ = bot
             .edit_message_text(chat_id, status_msg.id, format_progress_bar("📥 Скачивание", final_dl_pct))
             .await;
@@ -569,17 +578,19 @@ pub async fn process_and_send_media(
                 .iter()
                 .filter_map(|t| std::fs::metadata(&t.path).ok().map(|m| m.len()))
                 .sum();
-            let start_tx = read_network_tx_bytes();
 
             let total_tracks = tracks.len();
             let _ = bot
                 .edit_message_text(chat_id, status_msg.id, format_progress_bar("📤 Отправка", 0))
                 .await;
 
+            let start_tx = read_network_tx_bytes();
+            let ul_shown_pct = Arc::new(AtomicU8::new(0));
+            let ul_shown_clone = Arc::clone(&ul_shown_pct);
             let ul_bot = bot.clone();
             let ul_msg_id = status_msg.id;
             let ul_updater = tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_millis(800));
+                let mut interval = tokio::time::interval(std::time::Duration::from_millis(300));
                 interval.tick().await;
                 let mut last_pct = 0u8;
                 loop {
@@ -587,10 +598,19 @@ pub async fn process_and_send_media(
                     if total_files_bytes > 0 {
                         let current_tx = read_network_tx_bytes();
                         let sent = current_tx.saturating_sub(start_tx);
-                        let raw_pct = (sent as f64 / (total_files_bytes as f64 * 1.02)) * 100.0;
-                        let pct = raw_pct.round().clamp(0.0, 99.0) as u8;
+                        let raw_pct = (sent as f64 / (total_files_bytes as f64 * 1.05)) * 100.0;
+                        let tx_pct = raw_pct.round().clamp(0.0, 95.0) as u8;
+                        let pct = if total_files_bytes < 15 * 1024 * 1024 {
+                            // Small audio files (e.g. 2-5 MB SoundCloud MP3s) are absorbed by OS TCP buffers
+                            // almost immediately while Telegram DC processes sendAudio; step smoothly.
+                            last_pct.saturating_add(28).min(92)
+                        } else {
+                            let floor_pct = last_pct.saturating_add(8).min(25);
+                            tx_pct.max(floor_pct).min(last_pct.saturating_add(25)).min(95)
+                        };
                         if pct != last_pct {
                             last_pct = pct;
+                            ul_shown_clone.store(pct, Ordering::Relaxed);
                             let _ = ul_bot
                                 .edit_message_text(
                                     chat_id,
@@ -609,6 +629,7 @@ pub async fn process_and_send_media(
             for (idx, track) in tracks.iter().enumerate() {
                 if total_tracks > 1 {
                     let track_pct = ((idx as f64 / total_tracks as f64) * 100.0).round().clamp(0.0, 99.0) as u8;
+                    ul_shown_pct.store(track_pct, Ordering::Relaxed);
                     let _ = bot
                         .edit_message_text(
                             chat_id,
@@ -649,6 +670,12 @@ pub async fn process_and_send_media(
 
             ul_updater.abort();
 
+            if ul_shown_pct.load(Ordering::Relaxed) == 0 {
+                let _ = bot
+                    .edit_message_text(chat_id, status_msg.id, format_progress_bar("📤 Отправка", 50))
+                    .await;
+            }
+
             let _ = bot
                 .edit_message_text(chat_id, status_msg.id, format_progress_bar("📤 Отправка", 100))
                 .await;
@@ -664,16 +691,16 @@ pub async fn process_and_send_media(
                 .await
                 .map(|m| m.len())
                 .unwrap_or(0);
-            let start_tx = read_network_tx_bytes();
 
             let _ = bot
                 .edit_message_text(chat_id, status_msg.id, format_progress_bar("📤 Отправка", 0))
                 .await;
 
+            let start_tx = read_network_tx_bytes();
             let ul_bot = bot.clone();
             let ul_msg_id = status_msg.id;
             let ul_updater = tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_millis(800));
+                let mut interval = tokio::time::interval(std::time::Duration::from_millis(350));
                 interval.tick().await;
                 let mut last_pct = 0u8;
                 loop {
@@ -681,8 +708,14 @@ pub async fn process_and_send_media(
                     if file_size > 0 {
                         let current_tx = read_network_tx_bytes();
                         let sent = current_tx.saturating_sub(start_tx);
-                        let raw_pct = (sent as f64 / (file_size as f64 * 1.02)) * 100.0;
-                        let pct = raw_pct.round().clamp(0.0, 99.0) as u8;
+                        let raw_pct = (sent as f64 / (file_size as f64 * 1.05)) * 100.0;
+                        let tx_pct = raw_pct.round().clamp(0.0, 95.0) as u8;
+                        let pct = if file_size < 15 * 1024 * 1024 {
+                            last_pct.saturating_add(28).min(92)
+                        } else {
+                            let floor_pct = last_pct.saturating_add(8).min(25);
+                            tx_pct.max(floor_pct).min(last_pct.saturating_add(25)).min(95)
+                        };
                         if pct != last_pct {
                             last_pct = pct;
                             let _ = ul_bot

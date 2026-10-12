@@ -75,9 +75,11 @@ async fn run_ytdlp_once(
     let match_filter = format!("duration <=? {}", config.max_duration_secs);
 
     // For Pornhub CDN (ev.phncdn.com), rate=500k&burst=1600k/3800k throttles large single chunks.
-    // Setting chunk size to 1M lets each range request download at unthrottled burst speed.
+    // Setting chunk size to 1M lets each range request download at unthrottled burst speed,
+    // and provides finer-grained progress updates for small audio files (like SoundCloud tracks).
     let is_ph = is_pornhub_url(url);
-    let http_chunk_size = if is_ph { "1M" } else { "10M" };
+    let is_sc = crate::providers::soundcloud::is_soundcloud_url(url);
+    let http_chunk_size = if is_ph || is_sc || audio_only { "1M" } else { "10M" };
 
     let mut cmd = Command::new("yt-dlp");
 
@@ -97,12 +99,11 @@ async fn run_ytdlp_once(
         "--js-runtimes",
         "node",
         "--no-playlist",
+        "--progress",
         "--newline",
         "--progress-template",
         "download:EDIBLS_PROG:%(progress._percent_str)s",
     ]);
-
-    let is_sc = crate::providers::soundcloud::is_soundcloud_url(url);
 
     // Build combined youtube extractor args
     if let Some(pot_url) = &config.youtube_pot_url {
@@ -113,10 +114,10 @@ async fn run_ytdlp_once(
 
     if audio_only {
         if is_sc {
-            // SoundCloud has native MP3 and AAC streams: download directly without ffmpeg re-encoding
+            // SoundCloud has native MP3 and AAC streams: prefer direct progressive HTTP MP3 before HLS, without ffmpeg re-encoding
             cmd.args([
                 "-f",
-                "http_mp3_128/hls_mp3_128/ba[ext=mp3]/ba[ext=m4a]/ba",
+                "ba[ext=mp3][protocol^=http]/ba[ext=mp3]/ba[ext=m4a]/ba",
                 "--embed-metadata",
             ]);
         } else {
@@ -194,6 +195,24 @@ async fn run_ytdlp_once(
     let stdout_pipe = child.stdout.take().expect("stdout piped");
     let stderr_pipe = child.stderr.take().expect("stderr piped");
 
+    // Start at 10% immediately so the user sees immediate progress during yt-dlp startup & extraction
+    progress.store(10, Ordering::Relaxed);
+
+    let prog_ticker = Arc::clone(progress);
+    let ticker_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(350));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let cur = prog_ticker.load(Ordering::Relaxed);
+            let cap = if audio_only { 85 } else { 35 };
+            if cur < cap {
+                let step = if audio_only { 12 } else { 6 };
+                prog_ticker.store(cur.saturating_add(step).min(cap), Ordering::Relaxed);
+            }
+        }
+    });
+
     let prog_clone = Arc::clone(progress);
     let stdout_task = tokio::spawn(async move {
         let mut reader = BufReader::new(stdout_pipe).lines();
@@ -202,13 +221,43 @@ async fn run_ytdlp_once(
             if let Some(rest) = line.strip_prefix("EDIBLS_PROG:") {
                 let cleaned = rest.trim().trim_end_matches('%').trim();
                 if let Ok(val) = cleaned.parse::<f32>() {
-                    let pct = val.round().clamp(0.0, 100.0) as u8;
+                    let base = if audio_only { 35.0 } else { 20.0 };
+                    let span = if audio_only { 57.0 } else { 72.0 };
+                    let mapped = base + (val.clamp(0.0, 100.0) * (span / 100.0));
+                    let pct = mapped.round().clamp(base, 92.0) as u8;
                     let prev = prog_clone.load(Ordering::Relaxed);
                     if pct > prev {
                         prog_clone.store(pct, Ordering::Relaxed);
                     }
                 }
             } else {
+                let milestone = if line.contains("[Metadata]")
+                    || line.contains("[ExtractAudio]")
+                    || line.contains("[Merger]")
+                {
+                    Some(95u8)
+                } else if line.contains("Downloading m3u8 manifest")
+                    || line.contains("Checking thumbnail")
+                    || line.contains("Downloading 1 format")
+                {
+                    Some(40u8)
+                } else if line.contains("format info JSON") {
+                    Some(28u8)
+                } else if line.contains("Downloading info JSON")
+                    || line.contains("Extracting URL")
+                {
+                    Some(18u8)
+                } else {
+                    None
+                };
+
+                if let Some(m) = milestone {
+                    let prev = prog_clone.load(Ordering::Relaxed);
+                    if m > prev {
+                        prog_clone.store(m, Ordering::Relaxed);
+                    }
+                }
+
                 collected.push_str(&line);
                 collected.push('\n');
             }
@@ -231,6 +280,7 @@ async fn run_ytdlp_once(
         .await
         .map_err(|e| (format!("Failed waiting for yt-dlp process: {e}"), false))?;
 
+    ticker_task.abort();
     let stdout = stdout_task.await.unwrap_or_default();
     let stderr = stderr_task.await.unwrap_or_default();
 

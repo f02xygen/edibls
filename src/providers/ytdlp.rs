@@ -255,7 +255,17 @@ async fn run_ytdlp_once(
     let combined = format!("{stdout}\n{stderr}");
     log::error!("yt-dlp execution failed or skipped: {}", combined.trim());
 
-    if combined.contains("does not pass filter") && combined.contains("duration") {
+    if combined.contains("This video is DRM protected") || combined.contains("has_drm") {
+        Err((
+            "Этот трек защищён DRM (SoundCloud Go+) и недоступен для бесплатного скачивания.".to_string(),
+            false,
+        ))
+    } else if combined.contains("HTTP Error 404") && combined.contains("soundcloud") {
+        Err((
+            "Трек не найден на SoundCloud или был удалён.".to_string(),
+            false,
+        ))
+    } else if combined.contains("does not pass filter") && combined.contains("duration") {
         Err((
             format!(
                 "Видео слишком длинное (максимум {} минут)",

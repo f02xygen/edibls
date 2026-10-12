@@ -2,6 +2,10 @@ use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::config::Config;
@@ -324,8 +328,9 @@ pub async fn download_yandex_track(
     token: &str,
     output_dir: &Path,
     config: &Config,
+    progress: &Arc<AtomicU8>,
 ) -> Result<Vec<PathBuf>> {
-    let status = Command::new(&config.yandex_downloader_bin)
+    let mut child = Command::new(&config.yandex_downloader_bin)
         .arg("--quality")
         .arg("2")
         .arg("--token")
@@ -337,8 +342,9 @@ pub async fn download_yandex_track(
         .arg(output_dir)
         .arg("--url")
         .arg(url)
-        .status()
-        .await
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| {
             format!(
                 "Failed to execute {}. Make sure it is installed and present in PATH or specified in YANDEX_DOWNLOADER_BIN.",
@@ -346,11 +352,74 @@ pub async fn download_yandex_track(
             )
         })?;
 
+    let stdout_pipe = child.stdout.take().expect("stdout piped");
+    let stderr_pipe = child.stderr.take().expect("stderr piped");
+
+    let prog_clone = Arc::clone(progress);
+    prog_clone.store(10, Ordering::Relaxed);
+
+    let stdout_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(stdout_pipe).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            if line.starts_with("[") {
+                if let Some(bracket_end) = line.find("]") {
+                    let inside = &line[1..bracket_end];
+                    if let Some((cur_s, tot_s)) = inside.split_once("/") {
+                        if let (Ok(cur), Ok(tot)) = (cur_s.trim().parse::<u32>(), tot_s.trim().parse::<u32>()) {
+                            if tot > 0 {
+                                let base_pct = ((cur.saturating_sub(1)) as f32 / tot as f32 * 80.0) as u8;
+                                let track_pct = (base_pct + 15).min(90);
+                                let prev = prog_clone.load(Ordering::Relaxed);
+                                if track_pct > prev {
+                                    prog_clone.store(track_pct, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    let prog_ticker = Arc::clone(progress);
+    let ticker_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let cur = prog_ticker.load(Ordering::Relaxed);
+            if cur < 90 {
+                prog_ticker.store(cur.saturating_add(8).min(90), Ordering::Relaxed);
+            }
+        }
+    });
+
+    let stderr_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr_pipe).lines();
+        let mut collected = String::new();
+        while let Ok(Some(line)) = reader.next_line().await {
+            collected.push_str(&line);
+            collected.push('\n');
+        }
+        collected
+    });
+
+    let status = child
+        .wait()
+        .await
+        .context("Failed waiting for yandex-music-downloader process")?;
+
+    ticker_task.abort();
+    let _ = stdout_task.await;
+    let _ = stderr_task.await;
+
     if !status.success() {
         return Err(anyhow!(
             "yandex-music-downloader process exited with non-zero status"
         ));
     }
+
+    progress.store(100, Ordering::Relaxed);
 
     let mut downloaded_files = Vec::new();
     let mut read_dir = tokio::fs::read_dir(output_dir).await?;

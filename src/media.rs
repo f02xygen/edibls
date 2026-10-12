@@ -218,6 +218,7 @@ pub async fn fetch_media(
     url: &str,
     audio_only: bool,
     max_height: Option<u16>,
+    ym_quality: crate::settings::YandexQualityPreference,
     temp_dir: &Path,
     config: &Config,
     progress: & std::sync::Arc<std::sync::atomic::AtomicU8>,
@@ -228,7 +229,7 @@ pub async fn fetch_media(
             .as_deref()
             .ok_or_else(|| "YANDEX_MUSIC_TOKEN не настроен в .env файле.".to_string())?;
 
-        let files = download_yandex_track(url, token, temp_dir, config, progress)
+        let files = download_yandex_track(url, token, ym_quality, temp_dir, config, progress)
             .await
             .map_err(|e| e.to_string())?;
 

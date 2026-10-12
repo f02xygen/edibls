@@ -334,13 +334,19 @@ pub fn filter_and_dedup_tracks(
 pub async fn download_yandex_track(
     url: &str,
     token: &str,
+    ym_quality: crate::settings::YandexQualityPreference,
     output_dir: &Path,
     config: &Config,
     progress: &Arc<AtomicU8>,
 ) -> Result<Vec<PathBuf>> {
+    let quality_arg = match ym_quality {
+        crate::settings::YandexQualityPreference::Optimal => "1",
+        crate::settings::YandexQualityPreference::Lossless => "2",
+    };
+
     let mut child = Command::new(&config.yandex_downloader_bin)
         .arg("--quality")
-        .arg("2")
+        .arg(quality_arg)
         .arg("--token")
         .arg(token)
         .arg("--path-pattern")

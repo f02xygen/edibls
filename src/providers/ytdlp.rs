@@ -102,23 +102,37 @@ async fn run_ytdlp_once(
         "download:EDIBLS_PROG:%(progress._percent_str)s",
     ]);
 
-    // Build combined youtube extractor args so flags do not overwrite each other
-    let yt_extractor_args = if let Some(pot_url) = &config.youtube_pot_url {
-        format!("youtube:player_client=android,ios,web;po_token=web+{pot_url}")
-    } else {
-        "youtube:player_client=android,ios,web".to_string()
-    };
-    cmd.arg("--extractor-args").arg(yt_extractor_args);
+    let is_sc = crate::providers::soundcloud::is_soundcloud_url(url);
+
+    // Build combined youtube extractor args
+    if let Some(pot_url) = &config.youtube_pot_url {
+        let clean_pot = pot_url.trim_end_matches("/get_pot").trim_end_matches('/');
+        cmd.arg("--extractor-args")
+            .arg(format!("youtubepot-bgutilhttp:base_url={clean_pot}"));
+    }
 
     if audio_only {
-        cmd.args([
-            "-x",
-            "--audio-format",
-            "mp3",
-            "--embed-metadata",
-            "--postprocessor-args",
-            "ffmpeg:-threads 0",
-        ]);
+        if is_sc {
+            // SoundCloud has native MP3 and AAC streams: download directly without ffmpeg re-encoding
+            cmd.args([
+                "-f",
+                "http_mp3_128/hls_mp3_128/ba[ext=mp3]/ba[ext=m4a]/ba",
+                "--embed-metadata",
+            ]);
+        } else {
+            // For YouTube & other sites: prefer native m4a (AAC) or mp3 stream without CPU re-encoding.
+            // Telegram natively plays m4a (AAC) and mp3 with full album art & metadata.
+            cmd.args([
+                "-f",
+                "ba[ext=m4a]/ba[ext=mp3]/ba",
+                "-x",
+                "--audio-format",
+                "m4a",
+                "--embed-metadata",
+                "--postprocessor-args",
+                "ffmpeg:-threads 0",
+            ]);
+        }
     } else if let Some(height) = max_height {
         let format_selector = format!(
             "bestvideo[height<={height}][filesize<={max_filesize_str}]+bestaudio/bestvideo[height<={height}][filesize_approx<={max_filesize_str}]+bestaudio/best[height<={height}][filesize<={max_filesize_str}]/best[height<={height}][filesize_approx<={max_filesize_str}]/bestvideo[height<={height}]+bestaudio/best[height<={height}]"
@@ -137,8 +151,9 @@ async fn run_ytdlp_once(
             "mp4",
         ]);
     } else {
+        // Prioritize highest resolution bestvideo+bestaudio before single-file 'b' streams
         let format_selector = format!(
-            "b[filesize<={max_filesize_str}]/b[filesize_approx<={max_filesize_str}]/bestvideo[filesize<={max_filesize_str}]+bestaudio/bestvideo[filesize_approx<={max_filesize_str}]+bestaudio/best[filesize<={max_filesize_str}]/best[filesize_approx<={max_filesize_str}]/best"
+            "bestvideo[filesize<={max_filesize_str}]+bestaudio/bestvideo[filesize_approx<={max_filesize_str}]+bestaudio/best[filesize<={max_filesize_str}]/best[filesize_approx<={max_filesize_str}]/b[filesize<={max_filesize_str}]/b[filesize_approx<={max_filesize_str}]/best"
         );
         let sort_criteria = if is_ph {
             "proto:https,vcodec:h264,fps,res,acodec:m4a"

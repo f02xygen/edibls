@@ -8,7 +8,7 @@ services:
       - .env
     environment:
       - RUST_LOG=info
-      - YOUTUBE_POT_URL=http://pot-provider:4416/get_pot
+      - YOUTUBE_POT_URL=http://pot-provider:4416
       - TELEGRAM_API_URL=http://127.0.0.1:8081
       - SETTINGS_PATH=/app/data/settings.json
       - CACHE_PATH=/app/data/cache.json

@@ -49,5 +49,7 @@ jobs:
           port: ${{ secrets.SERVER_PORT || 22 }}
           script: |
             cd ${{ secrets.SERVER_APP_DIR || '~/edibls' }}
+            git pull origin main
             docker compose pull edibls
             docker compose up -d edibls
+

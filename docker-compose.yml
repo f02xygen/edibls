@@ -1,6 +1,7 @@
 services:
   edibls:
-    image: ghcr.io/f02xygen/edibls:latest
+    build: .
+    image: ${EDIBLS_IMAGE:-edibls:local}
     container_name: edibls
     restart: unless-stopped
     network_mode: "service:telegram-bot-api"

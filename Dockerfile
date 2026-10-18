@@ -45,7 +45,7 @@ RUN curl -fsSL https://deno.land/install.sh | sh \
 
 # Install fresh yt-dlp (with curl-cffi for TikTok/Cloudflare TLS impersonation), bgutil pot plugin, and yandex-music-downloader
 RUN pip install --no-cache-dir --upgrade \
-    "yt-dlp[default,curl-cffi]" \
+    --pre "yt-dlp[default,curl-cffi]" \
     bgutil-ytdlp-pot-provider \
     https://github.com/llistochek/yandex-music-downloader/archive/main.zip
 
@@ -63,8 +63,13 @@ COPY --from=tg-api \
 # Copy the compiled edibls binary from builder
 COPY --from=builder /usr/src/edibls/target/release/edibls /usr/local/bin/edibls
 
+# Copy static assets (e.g. subway surfers video)
+COPY assets /app/assets
+
 # Run as a dedicated non-root user (with write access to Python site-packages/bin for yt-dlp auto-updates)
-RUN useradd -m -u 1000 appuser \
+# and member of telegram-bot-api group (gid 101) to read local bot-api files
+RUN groupadd -g 101 telegram-bot-api \
+    && useradd -m -u 1000 -G telegram-bot-api appuser \
     && mkdir -p /app/data \
     && chown -R appuser:appuser /app /usr/local/lib/python3.12 /usr/local/bin
 USER appuser

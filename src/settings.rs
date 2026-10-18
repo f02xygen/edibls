@@ -27,6 +27,45 @@ pub enum DefaultSearchProvider {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SpeedPreference {
+    #[default]
+    Normal,     // 1.0x
+    Slower075,  // 0.75x
+    Faster125,  // 1.25x
+    Faster15,   // 1.5x
+    Faster20,   // 2.0x
+}
+
+impl SpeedPreference {
+    pub fn multiplier(&self) -> f32 {
+        match self {
+            SpeedPreference::Normal => 1.0,
+            SpeedPreference::Slower075 => 0.75,
+            SpeedPreference::Faster125 => 1.25,
+            SpeedPreference::Faster15 => 1.5,
+            SpeedPreference::Faster20 => 2.0,
+        }
+    }
+
+    pub fn to_f32(&self) -> Option<f32> {
+        match self {
+            SpeedPreference::Normal => None,
+            _ => Some(self.multiplier()),
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            SpeedPreference::Normal => "1.0x (Обычная)",
+            SpeedPreference::Slower075 => "0.75x",
+            SpeedPreference::Faster125 => "1.25x",
+            SpeedPreference::Faster15 => "1.5x",
+            SpeedPreference::Faster20 => "2.0x",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct UserSettings {
     #[serde(default)]
     pub quality: QualityPreference,
@@ -38,6 +77,8 @@ pub struct UserSettings {
     pub send_as_document: bool, // If true, media is sent as document without Telegram compression
     #[serde(default)]
     pub default_search: DefaultSearchProvider,
+    #[serde(default)]
+    pub default_speed: SpeedPreference,
 }
 
 #[derive(Clone)]
@@ -157,6 +198,22 @@ impl UserSettingsStore {
         updated
     }
 
+    pub fn toggle_speed(&self, user_id: UserId) -> UserSettings {
+        let mut guard = self.inner.lock().unwrap();
+        let entry = guard.entry(user_id.0).or_default();
+        entry.default_speed = match entry.default_speed {
+            SpeedPreference::Normal => SpeedPreference::Faster125,
+            SpeedPreference::Faster125 => SpeedPreference::Faster15,
+            SpeedPreference::Faster15 => SpeedPreference::Faster20,
+            SpeedPreference::Faster20 => SpeedPreference::Slower075,
+            SpeedPreference::Slower075 => SpeedPreference::Normal,
+        };
+        let updated = *entry;
+        drop(guard);
+        self.save();
+        updated
+    }
+
     fn save(&self) {
         let guard = self.inner.lock().unwrap();
         match serde_json::to_string_pretty(&*guard) {
@@ -195,6 +252,7 @@ mod tests {
             ym_quality: YandexQualityPreference::Optimal,
             send_as_document: false,
             default_search: DefaultSearchProvider::Yandex,
+            default_speed: SpeedPreference::Normal,
         });
 
         let updated = store.toggle_audio_only(uid);
@@ -217,6 +275,9 @@ mod tests {
         let updated_search_yt = store.toggle_default_search(uid);
         assert_eq!(updated_search_yt.default_search, DefaultSearchProvider::YouTube);
 
+        let updated_spd = store.toggle_speed(uid);
+        assert_eq!(updated_spd.default_speed, SpeedPreference::Faster125);
+
         // Reload store from same file
         let reloaded = UserSettingsStore::load_or_create(tmp.path());
         assert_eq!(reloaded.get(uid).quality, QualityPreference::AskEveryTime);
@@ -224,5 +285,6 @@ mod tests {
         assert_eq!(reloaded.get(uid).ym_quality, YandexQualityPreference::Lossless);
         assert_eq!(reloaded.get(uid).send_as_document, true);
         assert_eq!(reloaded.get(uid).default_search, DefaultSearchProvider::YouTube);
+        assert_eq!(reloaded.get(uid).default_speed, SpeedPreference::Faster125);
     }
 }

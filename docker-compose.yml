@@ -13,12 +13,16 @@ services:
       - TELEGRAM_API_URL=http://127.0.0.1:8081
       - SETTINGS_PATH=/app/data/settings.json
       - CACHE_PATH=/app/data/cache.json
+      - COOKIES_PATH=/app/cookies.txt
     tmpfs:
       - /tmp:size=4096M,mode=1777
     volumes:
       - edibls-data:/app/data
-      # Uncomment if you want to mount cookies.txt for yt-dlp:
-      # - ./cookies.txt:/app/cookies.txt:ro
+      - ./assets:/app/assets:ro
+      - ./cookies.txt:/app/cookies.txt
+      - telegram-bot-api-data:/var/lib/telegram-bot-api:ro
+    group_add:
+      - "101"
     depends_on:
       pot-provider:
         condition: service_started

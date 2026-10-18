@@ -13,6 +13,7 @@ venv/
 # Temporary downloaded media & covers
 *.mp3
 *.mp4
+!assets/*.mp4
 *.m4a
 *.webm
 *.jpg

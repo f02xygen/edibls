@@ -8,7 +8,7 @@ use teloxide::types::FileId;
 use crate::providers::pornhub::PornhubVideoInfo;
 use crate::providers::soundcloud::SoundcloudTrackInfo;
 use crate::providers::yandex::YandexTrackInfo;
-use crate::providers::youtube::YouTubeVideoInfo;
+use crate::providers::youtube::{YouTubeChapter, YouTubeVideoInfo};
 
 /// Maximum total media size tracked by the cache (5 GB).
 const MAX_CACHE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
@@ -19,6 +19,10 @@ const MAX_CACHE_ENTRIES: usize = 5_000;
 pub enum CachedMedia {
     Video(FileId),
     Audio(Vec<FileId>),
+    Photos {
+        photo_file_ids: Vec<FileId>,
+        audio_file_id: Option<FileId>,
+    },
 }
 
 #[derive(Clone)]
@@ -63,23 +67,32 @@ pub struct MediaCache {
 /// Normalizes media URLs to increase cache hit rate across clients and variations.
 pub fn normalize_media_url(raw_url: &str) -> String {
     let trimmed = raw_url.trim();
-    let Ok(mut parsed) = reqwest::Url::parse(trimmed) else {
+    let (base_part, fragment_part) = match trimmed.split_once('#') {
+        Some((b, f)) => (b.trim(), Some(f.trim())),
+        None => (trimmed, None),
+    };
+
+    let Ok(mut parsed) = reqwest::Url::parse(base_part) else {
         return trimmed.to_string();
     };
 
     let host = parsed.host_str().unwrap_or("").to_lowercase();
 
     // 1. YouTube normalization
-    if host == "youtu.be" {
+    let normalized_base = if host == "youtu.be" {
         let video_id = parsed.path().trim_start_matches('/');
         if !video_id.is_empty() {
-            return format!("https://www.youtube.com/watch?v={video_id}");
+            Some(format!("https://www.youtube.com/watch?v={video_id}"))
+        } else {
+            None
         }
     } else if host.contains("youtube.com") {
         if parsed.path().starts_with("/shorts/") {
             let video_id = parsed.path().trim_start_matches("/shorts/").trim_end_matches('/');
             if !video_id.is_empty() {
-                return format!("https://www.youtube.com/watch?v={video_id}");
+                Some(format!("https://www.youtube.com/watch?v={video_id}"))
+            } else {
+                None
             }
         } else if parsed.path().starts_with("/watch") {
             let mut video_id = None;
@@ -89,49 +102,66 @@ pub fn normalize_media_url(raw_url: &str) -> String {
                     break;
                 }
             }
-            if let Some(id) = video_id {
-                return format!("https://www.youtube.com/watch?v={id}");
-            }
+            video_id.map(|id| format!("https://www.youtube.com/watch?v={id}"))
+        } else {
+            None
         }
-    }
-
-    // 2. Yandex Music normalization
-    if host.contains("music.yandex.") || host.contains("yandex.ru") {
+    } else if host.contains("music.yandex.") || host.contains("yandex.ru") {
         let path = parsed.path();
         if let Some(idx) = path.find("/track/") {
             let track_part = &path[idx + "/track/".len()..];
             let tid = track_part.split('/').next().unwrap_or("");
             if !tid.is_empty() && tid.chars().all(|c| c.is_ascii_digit()) {
-                return format!("https://music.yandex.ru/track/{tid}");
+                Some(format!("https://music.yandex.ru/track/{tid}"))
+            } else {
+                None
             }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let mut result = match normalized_base {
+        Some(base) => base,
+        None => {
+            // Strip common tracking query params
+            let tracking_params = [
+                "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+                "si", "feature", "igsh", "igshid", "_t", "_r", "sender_device",
+                "is_from_webapp", "share_id", "source", "ref", "fbclid",
+            ];
+
+            let query_pairs: Vec<(String, String)> = parsed
+                .query_pairs()
+                .filter(|(k, _)| !tracking_params.contains(&k.as_ref()))
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
+
+            parsed.set_query(None);
+            if !query_pairs.is_empty() {
+                let mut pairs_mut = parsed.query_pairs_mut();
+                for (k, v) in &query_pairs {
+                    pairs_mut.append_pair(k, v);
+                }
+            }
+
+            let mut res = parsed.to_string();
+            if res.ends_with('/') && !res.ends_with("://") {
+                res.pop();
+            }
+            res
+        }
+    };
+
+    if let Some(frag) = fragment_part {
+        if !frag.is_empty() {
+            result.push('#');
+            result.push_str(frag);
         }
     }
 
-    // 3. Strip common tracking query params
-    let tracking_params = [
-        "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
-        "si", "feature", "igsh", "igshid", "_t", "_r", "sender_device",
-        "is_from_webapp", "share_id", "source", "ref", "fbclid",
-    ];
-
-    let query_pairs: Vec<(String, String)> = parsed
-        .query_pairs()
-        .filter(|(k, _)| !tracking_params.contains(&k.as_ref()))
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .collect();
-
-    parsed.set_query(None);
-    if !query_pairs.is_empty() {
-        let mut pairs_mut = parsed.query_pairs_mut();
-        for (k, v) in &query_pairs {
-            pairs_mut.append_pair(k, v);
-        }
-    }
-
-    let mut result = parsed.to_string();
-    if result.ends_with('/') && !result.ends_with("://") {
-        result.pop();
-    }
     result
 }
 
@@ -149,6 +179,8 @@ struct CacheState {
     ym_search_order: VecDeque<u64>,
     yt_searches: HashMap<u64, (String, Vec<YouTubeVideoInfo>)>,
     yt_search_order: VecDeque<u64>,
+    yt_chapters: HashMap<u64, Vec<YouTubeChapter>>,
+    yt_chapter_order: VecDeque<u64>,
     sc_searches: HashMap<u64, (String, Vec<SoundcloudTrackInfo>)>,
     sc_search_order: VecDeque<u64>,
     search_queries: HashMap<u64, String>,
@@ -289,6 +321,42 @@ impl MediaCache {
             .media
             .get(&(normalized, audio_only, max_height, send_as_document))
             .map(|entry| entry.media.clone())
+    }
+
+    /// Looks up any cached video `FileId` for the given URL, preferring one that matches `preferred_height` if specified.
+    pub fn get_cached_video_file_id(&self, url: &str, preferred_height: Option<u16>) -> Option<FileId> {
+        let normalized = normalize_media_url(url);
+        let state = self.inner.lock().ok()?;
+        let mut fallback = None;
+        for ((entry_url, audio_only, height, _), entry) in &state.media {
+            if !audio_only && entry_url == &normalized {
+                if let CachedMedia::Video(ref fid) = entry.media {
+                    if *height == preferred_height {
+                        return Some(fid.clone());
+                    }
+                    if fallback.is_none() {
+                        fallback = Some(fid.clone());
+                    }
+                }
+            }
+        }
+        fallback
+    }
+
+    /// Looks up any cached audio `FileId` for the given URL.
+    pub fn get_cached_audio_file_id(&self, url: &str) -> Option<FileId> {
+        let normalized = normalize_media_url(url);
+        let state = self.inner.lock().ok()?;
+        for ((entry_url, audio_only, _, _), entry) in &state.media {
+            if *audio_only && entry_url == &normalized {
+                if let CachedMedia::Audio(ref fids) = entry.media {
+                    if let Some(first) = fids.first() {
+                        return Some(first.clone());
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Stores Telegram `FileId`(s) for the given URL, mode (`audio_only`), resolution (`max_height`), and format (`send_as_document`),
@@ -474,6 +542,25 @@ impl MediaCache {
         state.yt_searches.get(&id).cloned()
     }
 
+    /// Stores YouTube chapters for a registered URL ID.
+    pub fn store_yt_chapters(&self, url_id: u64, chapters: Vec<YouTubeChapter>) {
+        if let Ok(mut state) = self.inner.lock() {
+            while state.yt_chapter_order.len() >= 500 {
+                if let Some(old_id) = state.yt_chapter_order.pop_front() {
+                    state.yt_chapters.remove(&old_id);
+                }
+            }
+            state.yt_chapter_order.push_back(url_id);
+            state.yt_chapters.insert(url_id, chapters);
+        }
+    }
+
+    /// Retrieves cached YouTube chapters by URL ID.
+    pub fn get_yt_chapters(&self, url_id: u64) -> Option<Vec<YouTubeChapter>> {
+        let state = self.inner.lock().ok()?;
+        state.yt_chapters.get(&url_id).cloned()
+    }
+
     /// Stores SoundCloud search results and returns a compact search ID.
     pub fn store_sc_search(&self, query: String, tracks: Vec<SoundcloudTrackInfo>) -> u64 {
         if let Ok(mut state) = self.inner.lock() {
@@ -636,6 +723,22 @@ mod tests {
             normalize_media_url("https://soundcloud.com/artist/track?si=abc&utm_medium=sharing"),
             "https://soundcloud.com/artist/track"
         );
+        assert_eq!(
+            normalize_media_url("https://youtu.be/dQw4w9WgXcQ?si=abc#clip=10-20"),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ#clip=10-20"
+        );
+        assert_eq!(
+            normalize_media_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ#subway"),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ#subway"
+        );
+        assert_eq!(
+            normalize_media_url("https://youtu.be/dQw4w9WgXcQ?si=abc#speed=1.50"),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ#speed=1.50"
+        );
+        assert_eq!(
+            normalize_media_url("https://youtu.be/dQw4w9WgXcQ?si=abc#clip=10-30#speed=2.00"),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ#clip=10-30#speed=2.00"
+        );
     }
 
     #[test]
@@ -643,5 +746,87 @@ mod tests {
         let cache = MediaCache::new();
         let q_id = cache.store_search_query("Bohemian Rhapsody".to_string());
         assert_eq!(cache.get_search_query(q_id).as_deref(), Some("Bohemian Rhapsody"));
+    }
+
+    #[test]
+    fn test_yt_chapters_cache() {
+        let cache = MediaCache::new();
+        let chs = vec![
+            YouTubeChapter {
+                title: "Intro".to_string(),
+                start_secs: 0,
+                end_secs: 30,
+            },
+            YouTubeChapter {
+                title: "Drop".to_string(),
+                start_secs: 30,
+                end_secs: 120,
+            },
+        ];
+        cache.store_yt_chapters(55, chs.clone());
+        let retrieved = cache.get_yt_chapters(55);
+        assert_eq!(retrieved, Some(chs));
+        assert_eq!(cache.get_yt_chapters(999), None);
+    }
+
+    #[test]
+    fn test_get_cached_video_file_id() {
+        let cache = MediaCache::new();
+        let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ#clip=10-20";
+        cache.insert(
+            url,
+            false,
+            Some(720),
+            false,
+            CachedMedia::Video(FileId("file_video_720".to_string())),
+            1000,
+        );
+
+        // Exact match on height
+        assert_eq!(
+            cache.get_cached_video_file_id(url, Some(720)),
+            Some(FileId("file_video_720".to_string()))
+        );
+        // Fallback when height is None or different
+        assert_eq!(
+            cache.get_cached_video_file_id(url, None),
+            Some(FileId("file_video_720".to_string()))
+        );
+        assert_eq!(
+            cache.get_cached_video_file_id(url, Some(1080)),
+            Some(FileId("file_video_720".to_string()))
+        );
+        // Missing URL
+        assert_eq!(
+            cache.get_cached_video_file_id("https://youtu.be/other", None),
+            None
+        );
+    }
+
+    #[test]
+    fn test_get_cached_audio_file_id() {
+        let cache = MediaCache::new();
+        let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+        cache.insert(
+            url,
+            true,
+            None,
+            false,
+            CachedMedia::Audio(vec![FileId("file_audio_123".to_string())]),
+            5000,
+        );
+
+        assert_eq!(
+            cache.get_cached_audio_file_id(url),
+            Some(FileId("file_audio_123".to_string()))
+        );
+        assert_eq!(
+            cache.get_cached_audio_file_id("https://youtu.be/dQw4w9WgXcQ"),
+            Some(FileId("file_audio_123".to_string()))
+        );
+        assert_eq!(
+            cache.get_cached_audio_file_id("https://youtu.be/missing"),
+            None
+        );
     }
 }

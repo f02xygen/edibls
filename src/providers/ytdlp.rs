@@ -8,6 +8,12 @@ use tokio::process::Command;
 use crate::config::Config;
 use crate::providers::pornhub::is_pornhub_url;
 
+#[derive(Debug, Clone)]
+pub struct DownloadedMedia {
+    pub path: PathBuf,
+    pub was_clipped_by_ytdlp: bool,
+}
+
 /// Downloads media via yt-dlp (video or audio-only) into the provided temp directory.
 /// If a video format's filesize is unknown in metadata and exceeds `max_filesize_mb` during download,
 /// automatically steps down to lower resolutions (720p -> 480p -> 240p).
@@ -19,7 +25,7 @@ pub async fn download_media(
     temp_dir: &Path,
     config: &Config,
     progress: &Arc<AtomicU8>,
-) -> Result<PathBuf, String> {
+) -> Result<DownloadedMedia, String> {
     let mut candidate_heights: Vec<Option<u16>> = vec![max_height];
     if !audio_only {
         let start_h = max_height.unwrap_or(u16::MAX);
@@ -29,6 +35,9 @@ pub async fn download_media(
             }
         }
     }
+
+    let is_yt = url.contains("youtube.com") || url.contains("youtu.be");
+    let use_cookies = if is_yt { false } else { config.cookies_path.is_some() };
 
     let mut last_err = String::new();
     for (idx, height_opt) in candidate_heights.into_iter().enumerate() {
@@ -40,13 +49,30 @@ pub async fn download_media(
             );
             progress.store(0, Ordering::Relaxed);
         }
-        match run_ytdlp_once(url, audio_only, height_opt, time_range, temp_dir, config, progress).await {
-            Ok(path) => return Ok(path),
-            Err((err_msg, is_filesize_exceeded)) => {
+        match run_ytdlp_once(url, audio_only, height_opt, time_range, temp_dir, config, progress, use_cookies).await {
+            Ok(path) => return Ok(DownloadedMedia { path, was_clipped_by_ytdlp: time_range.is_some() }),
+            Err((err_msg, is_filesize_exceeded, is_auth_required)) => {
                 last_err = err_msg;
-                if !is_filesize_exceeded {
-                    return Err(last_err);
+                if is_auth_required && is_yt && !use_cookies && config.cookies_path.is_some() {
+                    log::info!("YouTube requested authentication for {}; retrying with cookies", url);
+                    progress.store(0, Ordering::Relaxed);
+                    match run_ytdlp_once(url, audio_only, height_opt, time_range, temp_dir, config, progress, true).await {
+                        Ok(path) => return Ok(DownloadedMedia { path, was_clipped_by_ytdlp: time_range.is_some() }),
+                        Err((retry_err, _, _)) => return Err(retry_err),
+                    }
                 }
+                if is_filesize_exceeded {
+                    continue;
+                }
+                // If download-sections failed on non-YouTube or seek-restricted platforms, fallback to full download
+                if time_range.is_some() {
+                    log::warn!("yt-dlp download-sections failed for {}; attempting full download + local trim: {}", url, last_err);
+                    progress.store(0, Ordering::Relaxed);
+                    if let Ok(full_path) = run_ytdlp_once(url, audio_only, height_opt, None, temp_dir, config, progress, use_cookies).await {
+                        return Ok(DownloadedMedia { path: full_path, was_clipped_by_ytdlp: false });
+                    }
+                }
+                return Err(last_err);
             }
         }
     }
@@ -62,7 +88,8 @@ async fn run_ytdlp_once(
     temp_dir: &Path,
     config: &Config,
     progress: &Arc<AtomicU8>,
-) -> Result<PathBuf, (String, bool)> {
+    use_cookies: bool,
+) -> Result<PathBuf, (String, bool, bool)> {
     log::info!(
         "Processing URL (audio_only={}, max_height={:?}, time_range={:?}): {}",
         audio_only,
@@ -122,6 +149,8 @@ async fn run_ytdlp_once(
         cmd.arg("--extractor-args")
             .arg(format!("youtubepot-bgutilhttp:base_url={clean_pot}"));
     }
+    cmd.arg("--extractor-args")
+        .arg("youtube:player_client=mweb,web_safari,web");
 
     if audio_only {
         if is_sc {
@@ -147,7 +176,7 @@ async fn run_ytdlp_once(
         }
     } else if let Some(height) = max_height {
         let format_selector = format!(
-            "bestvideo[height<={height}][filesize<={max_filesize_str}]+bestaudio/bestvideo[height<={height}][filesize_approx<={max_filesize_str}]+bestaudio/best[height<={height}][filesize<={max_filesize_str}]/best[height<={height}][filesize_approx<={max_filesize_str}]/bestvideo[height<={height}]+bestaudio/best[height<={height}]"
+            "bestvideo*[height<=?{height}][filesize<=?{max_filesize_str}]+bestaudio/best[height<=?{height}][filesize<=?{max_filesize_str}]/best[height<=?{height}]/best"
         );
         let sort_criteria = if is_ph {
             format!("proto:https,res:{height},vcodec:h264,fps,acodec:m4a")
@@ -163,14 +192,14 @@ async fn run_ytdlp_once(
             "mp4",
         ]);
     } else {
-        // Prioritize highest resolution bestvideo+bestaudio before single-file 'b' streams
+        // Prioritize highest resolution bestvideo*+bestaudio or best with unknown/checked filesize
         let format_selector = format!(
-            "bestvideo[filesize<={max_filesize_str}]+bestaudio/bestvideo[filesize_approx<={max_filesize_str}]+bestaudio/best[filesize<={max_filesize_str}]/best[filesize_approx<={max_filesize_str}]/b[filesize<={max_filesize_str}]/b[filesize_approx<={max_filesize_str}]/best"
+            "bestvideo*[filesize<=?{max_filesize_str}]+bestaudio/best[filesize<=?{max_filesize_str}]/best"
         );
         let sort_criteria = if is_ph {
-            "proto:https,vcodec:h264,fps,res,acodec:m4a"
+            "proto:https,res,fps,vcodec:h264,acodec:m4a"
         } else {
-            "vcodec:h264,fps,res,acodec:m4a"
+            "res,fps,vcodec:h264,acodec:m4a"
         };
         cmd.args([
             "-f",
@@ -182,9 +211,11 @@ async fn run_ytdlp_once(
         ]);
     }
 
-    if let Some(cookies) = &config.cookies_path {
-        log::info!("Using cookies from: {:?}", cookies);
-        cmd.arg("--cookies").arg(cookies);
+    if use_cookies {
+        if let Some(cookies) = &config.cookies_path {
+            log::info!("Using cookies from: {:?}", cookies);
+            cmd.arg("--cookies").arg(cookies);
+        }
     }
 
     let filepath_record = temp_dir.join("filepath.txt");
@@ -209,7 +240,7 @@ async fn run_ytdlp_once(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| (format!("Failed to execute yt-dlp process: {e}"), false))?;
+        .map_err(|e| (format!("Failed to execute yt-dlp process: {e}"), false, false))?;
 
     let stdout_pipe = child.stdout.take().expect("stdout piped");
     let stderr_pipe = child.stderr.take().expect("stderr piped");
@@ -297,7 +328,7 @@ async fn run_ytdlp_once(
     let status = child
         .wait()
         .await
-        .map_err(|e| (format!("Failed waiting for yt-dlp process: {e}"), false))?;
+        .map_err(|e| (format!("Failed waiting for yt-dlp process: {e}"), false, false))?;
 
     ticker_task.abort();
     let stdout = stdout_task.await.unwrap_or_default();
@@ -325,6 +356,7 @@ async fn run_ytdlp_once(
                                     config.max_filesize_mb
                                 ),
                                 true,
+                                false,
                             ));
                         }
                     }
@@ -343,10 +375,12 @@ async fn run_ytdlp_once(
         Err((
             "Этот трек защищён DRM (SoundCloud Go+) и недоступен для бесплатного скачивания.".to_string(),
             false,
+            false,
         ))
     } else if combined.contains("HTTP Error 404") && combined.contains("soundcloud") {
         Err((
             "Трек не найден на SoundCloud или был удалён.".to_string(),
+            false,
             false,
         ))
     } else if combined.contains("does not pass filter") && combined.contains("duration") {
@@ -356,6 +390,7 @@ async fn run_ytdlp_once(
                 config.max_duration_secs / 60
             ),
             false,
+            false,
         ))
     } else if combined.contains("File is larger than max-filesize") {
         Err((
@@ -364,11 +399,21 @@ async fn run_ytdlp_once(
                 config.max_filesize_mb
             ),
             true,
+            false,
         ))
     } else {
+        let is_auth_required = combined.contains("Sign in to confirm")
+            || combined.contains("Sign in")
+            || combined.contains("confirm your age")
+            || combined.contains("age-restricted")
+            || combined.contains("Private video")
+            || combined.contains("login")
+            || combined.contains("bot");
+
         Err((
             "Не удалось скачать медиафайл по указанной ссылке".to_string(),
             false,
+            is_auth_required,
         ))
     }
 }

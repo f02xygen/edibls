@@ -5,10 +5,10 @@ use lofty::prelude::*;
 use lofty::probe::Probe;
 
 use crate::config::Config;
-use crate::providers::soundcloud::is_soundcloud_url;
 use crate::providers::yandex::{download_yandex_track, is_yandex_music_url};
 use crate::providers::ytdlp::download_media;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioTrack {
     pub path: PathBuf,
     pub title: Option<String>,
@@ -28,196 +28,95 @@ pub struct VideoFile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TimeRange {
-    pub start_secs: u64,
-    pub end_secs: u64,
-    pub raw_label: String,
+pub struct PhotoAlbum {
+    pub photos: Vec<PathBuf>,
+    pub audio: Option<AudioTrack>,
+    pub title: Option<String>,
+}
+
+use teloxide::types::{FileId, Message};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceMedia {
+    Video(FileId),
+    Audio(FileId),
+}
+
+pub fn extract_source_media(msg: &Message) -> Option<SourceMedia> {
+    if let Some(v) = msg.video() {
+        return Some(SourceMedia::Video(v.file.id.clone()));
+    }
+    if let Some(vn) = msg.video_note() {
+        return Some(SourceMedia::Video(vn.file.id.clone()));
+    }
+    if let Some(a) = msg.audio() {
+        return Some(SourceMedia::Audio(a.file.id.clone()));
+    }
+    if let Some(vo) = msg.voice() {
+        return Some(SourceMedia::Audio(vo.file.id.clone()));
+    }
+    if let Some(doc) = msg.document() {
+        let is_audio = doc
+            .mime_type
+            .as_ref()
+            .map(|m| m.as_ref().starts_with("audio/"))
+            .unwrap_or(false)
+            || doc
+                .file_name
+                .as_ref()
+                .map(|n| {
+                    let lower = n.to_lowercase();
+                    lower.ends_with(".mp3")
+                        || lower.ends_with(".m4a")
+                        || lower.ends_with(".flac")
+                        || lower.ends_with(".wav")
+                        || lower.ends_with(".ogg")
+                })
+                .unwrap_or(false);
+
+        if is_audio {
+            return Some(SourceMedia::Audio(doc.file.id.clone()));
+        } else {
+            return Some(SourceMedia::Video(doc.file.id.clone()));
+        }
+    }
+    None
+}
+
+pub fn extract_source_media_recursive(msg: &Message) -> Option<SourceMedia> {
+    if let Some(src) = extract_source_media(msg) {
+        return Some(src);
+    }
+    if let Some(parent) = msg.reply_to_message() {
+        return extract_source_media_recursive(parent);
+    }
+    None
 }
 
 pub enum MediaOutput {
     Audio(Vec<AudioTrack>),
     Video(VideoFile),
+    Photos(PhotoAlbum),
 }
 
-/// Parses timestamp strings such as "10", "01:25", "1:05:30" into total seconds.
-pub fn parse_timestamp(s: &str) -> Option<u64> {
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let parts: Vec<&str> = s.split(':').collect();
-    match parts.len() {
-        1 => parts[0].parse::<u64>().ok(),
-        2 => {
-            let mins = parts[0].parse::<u64>().ok()?;
-            let secs = parts[1].parse::<u64>().ok()?;
-            if secs < 60 {
-                Some(mins * 60 + secs)
-            } else {
-                None
-            }
-        }
-        3 => {
-            let hours = parts[0].parse::<u64>().ok()?;
-            let mins = parts[1].parse::<u64>().ok()?;
-            let secs = parts[2].parse::<u64>().ok()?;
-            if mins < 60 && secs < 60 {
-                Some(hours * 3600 + mins * 60 + secs)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
+#[allow(unused_imports)]
+pub use crate::parsing::{
+    extract_all_urls, extract_ph_search_query, extract_sc_search_query, extract_search_query,
+    extract_speed_modifier, extract_time_range, extract_url, extract_yt_search_query,
+    is_audio_request, parse_media_modifiers, parse_timestamp, TimeRange,
+};
+
+#[allow(dead_code)]
+pub fn parse_clip_fragment(url: &str) -> (String, Option<TimeRange>) {
+    let (base, tr, _, _) = parse_media_modifiers(url);
+    (base, tr)
 }
 
-/// Extracts a time range (e.g. 01:15-02:30 or 1:15 - 2:30) from the user text.
-pub fn extract_time_range(text: &str) -> Option<TimeRange> {
-    let words: Vec<&str> = text.split_whitespace().collect();
-    for sep in ['-', '–', '—'] {
-        for word in &words {
-            if word.starts_with("http://") || word.starts_with("https://") {
-                continue;
-            }
-            if let Some((left, right)) = word.split_once(sep) {
-                if let (Some(s), Some(e)) = (parse_timestamp(left), parse_timestamp(right)) {
-                    if e > s {
-                        return Some(TimeRange {
-                            start_secs: s,
-                            end_secs: e,
-                            raw_label: format!("{left}-{right}"),
-                        });
-                    }
-                }
-            }
-        }
-        for (i, &w) in words.iter().enumerate() {
-            if (w == "-" || w == "–" || w == "—") && i > 0 && i + 1 < words.len() {
-                let left = words[i - 1];
-                let right = words[i + 1];
-                if let (Some(s), Some(e)) = (parse_timestamp(left), parse_timestamp(right)) {
-                    if e > s {
-                        return Some(TimeRange {
-                            start_secs: s,
-                            end_secs: e,
-                            raw_label: format!("{left}-{right}"),
-                        });
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Extracts the first HTTP/HTTPS URL found in the message text.
-pub fn extract_url(text: &str) -> Option<&str> {
-    text.split_whitespace()
-        .find(|word| word.starts_with("http://") || word.starts_with("https://"))
-}
-
-/// Extracts a SoundCloud search query from the message text (/sc <query> or /soundcloud <query>).
-pub fn extract_sc_search_query(text: &str) -> Option<&str> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() || extract_url(trimmed).is_some() {
-        return None;
-    }
-
-    if let Some(first_word) = trimmed.split_whitespace().next() {
-        if first_word.starts_with('/') {
-            let cmd = first_word.split('@').next().unwrap_or(first_word);
-            if matches!(cmd, "/sc" | "/soundcloud") {
-                let rest = trimmed[first_word.len()..].trim();
-                if !rest.is_empty() {
-                    return Some(rest);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Extracts a YouTube search query from the message text (/yt <query> or /youtube <query>).
-pub fn extract_yt_search_query(text: &str) -> Option<&str> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() || extract_url(trimmed).is_some() {
-        return None;
-    }
-
-    if let Some(first_word) = trimmed.split_whitespace().next() {
-        if first_word.starts_with('/') {
-            let cmd = first_word.split('@').next().unwrap_or(first_word);
-            if matches!(cmd, "/yt" | "/youtube") {
-                let rest = trimmed[first_word.len()..].trim();
-                if !rest.is_empty() {
-                    return Some(rest);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Extracts a Pornhub search query from the message text (/ph <query> or /pornhub <query>).
-pub fn extract_ph_search_query(text: &str) -> Option<&str> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() || extract_url(trimmed).is_some() {
-        return None;
-    }
-
-    if let Some(first_word) = trimmed.split_whitespace().next() {
-        if first_word.starts_with('/') {
-            let cmd = first_word.split('@').next().unwrap_or(first_word);
-            if matches!(cmd, "/ph" | "/pornhub") {
-                let rest = trimmed[first_word.len()..].trim();
-                if !rest.is_empty() {
-                    return Some(rest);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Extracts a Yandex Music track search query from the message text.
-/// Supports `/ym <query>`, `/audio <query>`, `/mp3 <query>`, `/search <query>` in any chat,
-/// as well as plain text (without links or slash commands) in private chats.
-pub fn extract_search_query(text: &str, is_private: bool) -> Option<&str> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() || extract_url(trimmed).is_some() {
-        return None;
-    }
-
-    if let Some(first_word) = trimmed.split_whitespace().next() {
-        if first_word.starts_with('/') {
-            let cmd = first_word.split('@').next().unwrap_or(first_word);
-            if matches!(cmd, "/ym" | "/audio" | "/mp3" | "/search") {
-                let rest = trimmed[first_word.len()..].trim();
-                if !rest.is_empty() {
-                    return Some(rest);
-                }
-            }
-            return None;
-        }
-    }
-
-    if is_private {
-        Some(trimmed)
-    } else {
-        None
-    }
-}
-
-/// Determines whether the request should be processed as audio-only.
-pub fn is_audio_request(url: &str, text: &str, user_audio_only_setting: bool) -> bool {
-    user_audio_only_setting
-        || is_yandex_music_url(url)
-        || is_soundcloud_url(url)
-        || text.starts_with("/audio")
-        || text.starts_with("/mp3")
-        || text.starts_with("/sc")
-        || text.contains("audio")
-}
+#[allow(unused_imports)]
+pub use crate::ffmpeg::{
+    attach_subway_surfers, build_atempo_filter, extract_audio_from_video, find_subway_asset,
+    get_video_dimensions, has_audio_stream, probe_video_metadata, process_media_cut_or_speed,
+};
 
 /// Reads audio tags and resizes the cover image to fit Telegram API restrictions (max 320x320).
 pub fn process_audio_metadata(file_path: &Path) -> AudioTrack {
@@ -327,6 +226,7 @@ pub async fn fetch_media(
     audio_only: bool,
     max_height: Option<u16>,
     time_range: Option<&TimeRange>,
+    speed: Option<f32>,
     ym_quality: crate::settings::YandexQualityPreference,
     temp_dir: &Path,
     config: &Config,
@@ -342,23 +242,86 @@ pub async fn fetch_media(
             .await
             .map_err(|e| e.to_string())?;
 
+        progress.store(95, std::sync::atomic::Ordering::Relaxed);
+
+        let mut processed_files = Vec::new();
+        if time_range.is_some() || (speed.is_some() && (speed.unwrap() - 1.0).abs() > 0.01) {
+            for (idx, f) in files.into_iter().enumerate() {
+                let ext = f.extension().and_then(|s| s.to_str()).unwrap_or("mp3");
+                let out_p = temp_dir.join(format!("ym_cut_speed_{idx}.{ext}"));
+                process_media_cut_or_speed(&f, time_range, speed, true, &out_p).await?;
+                processed_files.push(out_p);
+            }
+        } else {
+            processed_files = files;
+        }
+
         progress.store(100, std::sync::atomic::Ordering::Relaxed);
-        let tracks = process_tracks_blocking(files).await;
+        let tracks = process_tracks_blocking(processed_files).await;
         return Ok(MediaOutput::Audio(tracks));
     }
 
-    let file_path = download_media(url, audio_only, max_height, time_range, temp_dir, config, progress).await?;
+    let downloaded = download_media(url, audio_only, max_height, time_range, temp_dir, config, progress).await?;
+    let mut file_path = downloaded.path;
+
+    let needs_cut = time_range.is_some() && !downloaded.was_clipped_by_ytdlp;
+    let needs_speed = speed.is_some() && (speed.unwrap() - 1.0).abs() > 0.01;
+
+    if needs_cut || needs_speed {
+        let ext = file_path.extension().and_then(|s| s.to_str()).unwrap_or(if audio_only { "mp3" } else { "mp4" });
+        let out_p = temp_dir.join(format!("processed_final.{ext}"));
+        let tr_to_apply = if needs_cut { time_range } else { None };
+        process_media_cut_or_speed(&file_path, tr_to_apply, speed, audio_only, &out_p).await?;
+        file_path = out_p;
+    }
 
     if audio_only {
         let tracks = process_tracks_blocking(vec![file_path]).await;
         Ok(MediaOutput::Audio(tracks))
     } else {
-        let (width, height, duration_secs, thumbnail_path) = probe_video_metadata(&file_path).await;
+        let ext = file_path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+        let is_image = matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp");
+
+        let mut image_files = Vec::new();
+        let mut audio_file = None;
+        if let Ok(mut entries) = tokio::fs::read_dir(temp_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let p = entry.path();
+                if p.is_file() {
+                    let e = p.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+                    if matches!(e.as_str(), "jpg" | "jpeg" | "png" | "webp") {
+                        if !p.file_name().and_then(|n| n.to_str()).unwrap_or("").ends_with("thumb.jpg") {
+                            image_files.push(p);
+                        }
+                    } else if matches!(e.as_str(), "mp3" | "m4a" | "ogg" | "wav" | "flac") {
+                        audio_file = Some(p);
+                    }
+                }
+            }
+        }
+        image_files.sort();
+
         let title = tokio::fs::read_to_string(temp_dir.join("title.txt"))
             .await
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+
+        if is_image || (!image_files.is_empty() && !matches!(ext.as_str(), "mp4" | "mkv" | "webm" | "mov" | "avi")) {
+            let audio_track = if let Some(ap) = audio_file {
+                let tracks = process_tracks_blocking(vec![ap]).await;
+                tracks.into_iter().next()
+            } else {
+                None
+            };
+            return Ok(MediaOutput::Photos(PhotoAlbum {
+                photos: if image_files.is_empty() { vec![file_path] } else { image_files },
+                audio: audio_track,
+                title,
+            }));
+        }
+
+        let (width, height, duration_secs, thumbnail_path) = probe_video_metadata(&file_path).await;
 
         Ok(MediaOutput::Video(VideoFile {
             path: file_path,
@@ -371,103 +334,7 @@ pub async fn fetch_media(
     }
 }
 
-/// Probes video dimensions, duration, and extracts a thumbnail frame (max 320x320) via ffprobe and ffmpeg.
-pub async fn probe_video_metadata(path: &Path) -> (Option<u32>, Option<u32>, Option<u32>, Option<PathBuf>) {
-    let output = tokio::process::Command::new("ffprobe")
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=width,height,duration:format=duration",
-            "-of",
-            "json",
-        ])
-        .arg(path)
-        .output()
-        .await
-        .ok();
 
-    let mut width = None;
-    let mut height = None;
-    let mut duration_secs = None;
-
-    if let Some(out) = output {
-        if out.status.success() {
-            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                if let Some(stream) = val.pointer("/streams/0") {
-                    width = stream.get("width").and_then(|v| v.as_u64()).map(|v| v as u32);
-                    height = stream.get("height").and_then(|v| v.as_u64()).map(|v| v as u32);
-                    if let Some(d_str) = stream.get("duration").and_then(|v| v.as_str()) {
-                        if let Ok(d) = d_str.parse::<f64>() {
-                            if d > 0.0 {
-                                duration_secs = Some(d.round() as u32);
-                            }
-                        }
-                    }
-                }
-                if duration_secs.is_none() {
-                    if let Some(d_str) = val.pointer("/format/duration").and_then(|v| v.as_str()) {
-                        if let Ok(d) = d_str.parse::<f64>() {
-                            if d > 0.0 {
-                                duration_secs = Some(d.round() as u32);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let thumb_path = path.with_extension("thumb.jpg");
-    let ss_time = match duration_secs {
-        Some(d) if d > 3 => "1",
-        Some(_) => "0",
-        None => "1",
-    };
-
-    let thumb_res = tokio::process::Command::new("ffmpeg")
-        .args([
-            "-v",
-            "error",
-            "-y",
-            "-ss",
-            ss_time,
-            "-i",
-        ])
-        .arg(path)
-        .args([
-            "-frames:v",
-            "1",
-            "-vf",
-            "scale='min(320,iw)':'min(320,ih)':force_original_aspect_ratio=decrease",
-            "-q:v",
-            "3",
-        ])
-        .arg(&thumb_path)
-        .kill_on_drop(true)
-        .status()
-        .await;
-
-    let final_thumb = if thumb_res.map(|s| s.success()).unwrap_or(false) && thumb_path.exists() {
-        Some(thumb_path)
-    } else {
-        None
-    };
-
-    (width, height, duration_secs, final_thumb)
-}
-
-/// Probes video file dimensions (width, height) using ffprobe.
-#[allow(dead_code)]
-pub async fn get_video_dimensions(path: &Path) -> Option<(u32, u32)> {
-    let (w, h, _, _) = probe_video_metadata(path).await;
-    match (w, h) {
-        (Some(width), Some(height)) if width > 0 && height > 0 => Some((width, height)),
-        _ => None,
-    }
-}
 
 
 #[cfg(test)]
@@ -573,6 +440,78 @@ mod tests {
 
         assert!(extract_time_range("https://youtu.be/123").is_none());
         assert!(extract_time_range("https://youtu.be/123 02:00-01:00").is_none());
+    }
+
+    #[test]
+    fn test_extract_all_urls() {
+        let text = "Check https://youtu.be/123 and https://vm.tiktok.com/456, plus http://site.com/789";
+        let urls = extract_all_urls(text);
+        assert_eq!(urls, vec!["https://youtu.be/123", "https://vm.tiktok.com/456", "http://site.com/789"]);
+
+        let dups = "https://youtu.be/123 text https://youtu.be/123";
+        assert_eq!(extract_all_urls(dups), vec!["https://youtu.be/123"]);
+
+        assert!(extract_all_urls("no links here").is_empty());
+    }
+
+    #[test]
+    fn test_find_subway_asset() {
+        let asset = find_subway_asset();
+        assert!(asset.is_some(), "assets/subway_surfers.mp4 should exist");
+    }
+
+    #[test]
+    fn test_extract_speed_modifier() {
+        assert_eq!(extract_speed_modifier("https://youtu.be/123 2x"), Some(2.0));
+        assert_eq!(extract_speed_modifier("https://youtu.be/123 1.5x"), Some(1.5));
+        assert_eq!(extract_speed_modifier("https://youtu.be/123 0.75x"), Some(0.75));
+        assert_eq!(extract_speed_modifier("/speed 2x https://youtu.be/123"), Some(2.0));
+        assert_eq!(extract_speed_modifier("/speed 1.25"), Some(1.25));
+        assert_eq!(extract_speed_modifier("https://youtu.be/123 1.0x"), None);
+        assert_eq!(extract_speed_modifier("https://youtu.be/123"), None);
+    }
+
+    #[test]
+    fn test_build_atempo_filter() {
+        assert_eq!(build_atempo_filter(1.5), "atempo=1.50");
+        assert_eq!(build_atempo_filter(2.0), "atempo=2.00");
+        assert_eq!(build_atempo_filter(0.75), "atempo=0.75");
+        assert_eq!(build_atempo_filter(3.0), "atempo=2.0,atempo=1.50");
+        assert_eq!(build_atempo_filter(0.25), "atempo=0.5,atempo=0.50");
+    }
+
+    #[test]
+    fn test_parse_media_modifiers() {
+        let (base, tr, spd, sub) = parse_media_modifiers("https://site.com/video#clip=10-30#speed=1.50#subway");
+        assert_eq!(base, "https://site.com/video");
+        assert_eq!(tr.unwrap().start_secs, 10);
+        assert_eq!(spd, Some(1.5));
+        assert!(sub);
+
+        let (base2, tr2, spd2, sub2) = parse_media_modifiers("https://site.com/video#speed=2.00");
+        assert_eq!(base2, "https://site.com/video");
+        assert!(tr2.is_none());
+        assert_eq!(spd2, Some(2.0));
+        assert!(!sub2);
+    }
+
+    #[test]
+    fn test_enhanced_time_range_formats() {
+        let r1 = extract_time_range("https://youtu.be/123 15-45").unwrap();
+        assert_eq!(r1.start_secs, 15);
+        assert_eq!(r1.end_secs, 45);
+
+        let r2 = extract_time_range("https://youtu.be/123 10..40").unwrap();
+        assert_eq!(r2.start_secs, 10);
+        assert_eq!(r2.end_secs, 40);
+
+        let r3 = extract_time_range("https://youtu.be/123 00:10 00:50").unwrap();
+        assert_eq!(r3.start_secs, 10);
+        assert_eq!(r3.end_secs, 50);
+
+        let r4 = extract_time_range("/clip https://youtu.be/123 30").unwrap();
+        assert_eq!(r4.start_secs, 0);
+        assert_eq!(r4.end_secs, 30);
     }
 }
 

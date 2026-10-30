@@ -26,6 +26,13 @@ pub fn get_bot_username() -> Option<&'static str> {
     BOT_USERNAME.get().map(|s| s.as_str())
 }
 
+fn escape_html(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 const INLINE_PAGE_SIZE: usize = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,12 +130,13 @@ pub async fn handle_inline_query(
                     for (idx, vid) in videos.into_iter().enumerate() {
                         let url = vid.canonical_url();
                         let url_id = cache.register_url(&url);
+                        let safe_title = escape_html(&vid.title);
                         let mut article = InlineQueryResultArticle::new(
                             format!("ph_{}_{}", vid.vkey, idx),
                             format!("🔞 {}", vid.title),
                             InputMessageContent::Text(InputMessageContentText::new(format!(
                                 "🔞 <b>{}</b>\n⏱ <b>Длительность:</b> {}\n\n{}",
-                                vid.title,
+                                safe_title,
                                 vid.duration.as_deref().unwrap_or("—"),
                                 url
                             )).parse_mode(ParseMode::Html)),
@@ -365,12 +373,15 @@ fn format_yandex_results(
             _ => "—".to_string(),
         };
 
+        let safe_artists = escape_html(&artists_str);
+        let safe_title = escape_html(&track.title);
+
         let message_text = format!(
             "🎵 <b>{} — {}</b>\n\
             ⏱ <b>Длительность:</b> {}\n\
             💿 <b>Источник:</b> <i>Яндекс Музыка</i>\n\n\
             <i>Нажмите кнопку ниже, чтобы получить трек через бота:</i>",
-            artists_str, track.title, duration_str
+            safe_artists, safe_title, duration_str
         );
 
         let url_id = cache.register_url(&url);
@@ -436,12 +447,15 @@ fn format_soundcloud_results(
         let uploader_str = track.uploader.as_deref().unwrap_or("SoundCloud");
         let dur_str = track.duration_str.as_deref().unwrap_or("—");
 
+        let safe_uploader = escape_html(uploader_str);
+        let safe_title = escape_html(&track.title);
+
         let message_text = format!(
             "☁️ <b>{} — {}</b>\n\
             ⏱ <b>Длительность:</b> {}\n\
             💿 <b>Источник:</b> <i>SoundCloud</i>\n\n\
             <i>Нажмите кнопку ниже, чтобы получить трек через бота:</i>",
-            uploader_str, track.title, dur_str
+            safe_uploader, safe_title, dur_str
         );
 
         let dl_url = format!("https://t.me/{bot_username}?start=dl_{url_id}");
@@ -505,13 +519,16 @@ fn format_youtube_results(
         let channel_str = vid.uploader.as_deref().unwrap_or("YouTube");
         let dur_str = vid.duration_str.as_deref().unwrap_or("—");
 
+        let safe_title = escape_html(&vid.title);
+        let safe_channel = escape_html(channel_str);
+
         let message_text = format!(
             "🎬 <b>{}</b>\n\
             👤 <b>Канал:</b> {}\n\
             ⏱ <b>Длительность:</b> {}\n\
             🔗 {}\n\n\
             <i>Нажмите кнопку ниже, чтобы скачать видео или аудио:</i>",
-            vid.title, channel_str, dur_str, vid.url
+            safe_title, safe_channel, dur_str, vid.url
         );
 
         let dl_url = format!("https://t.me/{bot_username}?start=dl_{url_id}");

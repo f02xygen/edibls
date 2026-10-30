@@ -31,10 +31,26 @@ impl Config {
             .unwrap_or(3);
 
         let raw_cookies_path = env::var("COOKIES_PATH").unwrap_or_else(|_| "cookies.txt".to_string());
-        let cookies_path = if Path::new(&raw_cookies_path).is_file() {
-            Some(PathBuf::from(raw_cookies_path))
-        } else {
-            None
+        let cookies_path = {
+            let path = Path::new(&raw_cookies_path);
+            if path.is_file() {
+                if let Ok(meta) = path.metadata() {
+                    if meta.len() > 0 {
+                        match std::fs::read_to_string(path) {
+                            Ok(content) if content.lines().any(|l| !l.trim().is_empty()) => {
+                                Some(PathBuf::from(raw_cookies_path))
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         };
 
         let youtube_pot_url = env::var("YOUTUBE_POT_URL")

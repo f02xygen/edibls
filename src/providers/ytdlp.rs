@@ -37,7 +37,8 @@ pub async fn download_media(
     }
 
     let is_yt = url.contains("youtube.com") || url.contains("youtu.be");
-    let use_cookies = if is_yt { false } else { config.cookies_path.is_some() };
+    let is_sc = crate::providers::soundcloud::is_soundcloud_url(url);
+    let use_cookies = if is_yt || is_sc { false } else { config.cookies_path.is_some() };
 
     let mut last_err = String::new();
     for (idx, height_opt) in candidate_heights.into_iter().enumerate() {
@@ -61,6 +62,13 @@ pub async fn download_media(
                         Err((retry_err, _, _)) => return Err(retry_err),
                     }
                 }
+                if use_cookies {
+                    log::warn!("yt-dlp failed with cookies for {}; retrying without cookies: {}", url, last_err);
+                    progress.store(0, Ordering::Relaxed);
+                    if let Ok(path) = run_ytdlp_once(url, audio_only, height_opt, time_range, temp_dir, config, progress, false).await {
+                        return Ok(DownloadedMedia { path, was_clipped_by_ytdlp: time_range.is_some() });
+                    }
+                }
                 if is_filesize_exceeded {
                     continue;
                 }
@@ -68,7 +76,7 @@ pub async fn download_media(
                 if time_range.is_some() {
                     log::warn!("yt-dlp download-sections failed for {}; attempting full download + local trim: {}", url, last_err);
                     progress.store(0, Ordering::Relaxed);
-                    if let Ok(full_path) = run_ytdlp_once(url, audio_only, height_opt, None, temp_dir, config, progress, use_cookies).await {
+                    if let Ok(full_path) = run_ytdlp_once(url, audio_only, height_opt, None, temp_dir, config, progress, false).await {
                         return Ok(DownloadedMedia { path: full_path, was_clipped_by_ytdlp: false });
                     }
                 }

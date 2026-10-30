@@ -251,13 +251,33 @@ pub fn extract_xml_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
     Some(&xml[start..end])
 }
 
+#[derive(Clone)]
+struct DirectUrlCacheEntry {
+    url: String,
+    expires_at: Instant,
+}
+
+static DIRECT_URL_CACHE: OnceLock<RwLock<HashMap<String, DirectUrlCacheEntry>>> = OnceLock::new();
+
+fn get_direct_url_cache() -> &'static RwLock<HashMap<String, DirectUrlCacheEntry>> {
+    DIRECT_URL_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
 /// Fetches the direct public MP3 streaming URL for a given track from Yandex Music API.
-#[allow(dead_code)]
 pub async fn fetch_direct_mp3_url(track_id: &str, token: Option<&str>) -> Result<String> {
-    let client = reqwest::Client::new();
+    let now = Instant::now();
+    if let Ok(guard) = get_direct_url_cache().read() {
+        if let Some(entry) = guard.get(track_id) {
+            if entry.expires_at > now {
+                return Ok(entry.url.clone());
+            }
+        }
+    }
+
+    let client = ym_http_client();
     let url = format!("https://api.music.yandex.net/tracks/{track_id}/download-info");
     let mut req = client.get(&url);
-    if let Some(t) = token {
+    if let Some(t) = token.filter(|s| !s.trim().is_empty()) {
         req = req.header("Authorization", format!("OAuth {t}"));
     }
     let resp: serde_json::Value = req.send().await?.json().await?;
@@ -292,7 +312,22 @@ pub async fn fetch_direct_mp3_url(track_id: &str, token: Option<&str>) -> Result
         let _ = write!(sign, "{:02x}", b);
     }
 
-    Ok(format!("https://{host}/get-mp3/{sign}/{ts}{path}"))
+    let direct_url = format!("https://{host}/get-mp3/{sign}/{ts}{path}");
+
+    if let Ok(mut guard) = get_direct_url_cache().write() {
+        if guard.len() > 2000 {
+            guard.retain(|_, v| v.expires_at > now);
+        }
+        guard.insert(
+            track_id.to_string(),
+            DirectUrlCacheEntry {
+                url: direct_url.clone(),
+                expires_at: now + Duration::from_secs(3 * 3600),
+            },
+        );
+    }
+
+    Ok(direct_url)
 }
 fn normalize_text(s: &str) -> String {
     let mapped: String = s

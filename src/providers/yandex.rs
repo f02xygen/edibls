@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow};
+use md5::{Digest, Md5};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -203,7 +204,56 @@ pub async fn search_yandex_tracks(
     Ok(filter_and_dedup_tracks(query, tracks))
 }
 
-/// Normalizes text for comparison: lowercase, replaces 'ё' with 'е', strips punctuation into single spaces.
+pub fn extract_xml_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
+    let open_tag = format!("<{tag}>");
+    let close_tag = format!("</{tag}>");
+    let start = xml.find(&open_tag)? + open_tag.len();
+    let end = xml[start..].find(&close_tag)? + start;
+    Some(&xml[start..end])
+}
+
+/// Fetches the direct public MP3 streaming URL for a given track from Yandex Music API.
+pub async fn fetch_direct_mp3_url(track_id: &str, token: Option<&str>) -> Result<String> {
+    let client = reqwest::Client::new();
+    let url = format!("https://api.music.yandex.net/tracks/{track_id}/download-info");
+    let mut req = client.get(&url);
+    if let Some(t) = token {
+        req = req.header("Authorization", format!("OAuth {t}"));
+    }
+    let resp: serde_json::Value = req.send().await?.json().await?;
+    let info_url = resp
+        .get("result")
+        .and_then(|r| r.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|obj| obj.get("downloadInfoUrl"))
+        .and_then(|u| u.as_str())
+        .ok_or_else(|| anyhow!("No downloadInfoUrl found in Yandex API response"))?;
+
+    let xml_text = client.get(info_url).send().await?.text().await?;
+
+    let host = extract_xml_tag(&xml_text, "host")
+        .ok_or_else(|| anyhow!("Missing <host> tag in Yandex XML"))?;
+    let path = extract_xml_tag(&xml_text, "path")
+        .ok_or_else(|| anyhow!("Missing <path> tag in Yandex XML"))?;
+    let ts = extract_xml_tag(&xml_text, "ts")
+        .ok_or_else(|| anyhow!("Missing <ts> tag in Yandex XML"))?;
+    let s = extract_xml_tag(&xml_text, "s")
+        .ok_or_else(|| anyhow!("Missing <s> tag in Yandex XML"))?;
+
+    let secret = "XGRlBW9FXlekgbPrRHuSiA";
+    let path_stripped = path.strip_prefix('/').unwrap_or(path);
+    let sign_src = format!("{secret}{path_stripped}{s}");
+    let mut hasher = Md5::new();
+    hasher.update(sign_src.as_bytes());
+    let hash = hasher.finalize();
+    let mut sign = String::with_capacity(32);
+    for b in hash {
+        use std::fmt::Write;
+        let _ = write!(sign, "{:02x}", b);
+    }
+
+    Ok(format!("https://{host}/get-mp3/{sign}/{ts}{path}"))
+}
 fn normalize_text(s: &str) -> String {
     let mapped: String = s
         .to_lowercase()
@@ -513,6 +563,16 @@ mod tests {
                 cover_uri: None,
             },
         ]
+    }
+
+    #[test]
+    fn test_extract_xml_tag() {
+        let xml = "<download-info><host>s253iva.storage.yandex.net</host><path>/get-mp3/test</path><ts>1234</ts><s>abcd</s></download-info>";
+        assert_eq!(extract_xml_tag(xml, "host"), Some("s253iva.storage.yandex.net"));
+        assert_eq!(extract_xml_tag(xml, "path"), Some("/get-mp3/test"));
+        assert_eq!(extract_xml_tag(xml, "ts"), Some("1234"));
+        assert_eq!(extract_xml_tag(xml, "s"), Some("abcd"));
+        assert_eq!(extract_xml_tag(xml, "nonexistent"), None);
     }
 
     #[test]

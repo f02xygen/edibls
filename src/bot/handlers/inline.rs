@@ -3,16 +3,16 @@ use std::sync::OnceLock;
 use teloxide::prelude::*;
 use teloxide::types::{
     InlineKeyboardButton, InlineKeyboardMarkup, InlineQuery, InlineQueryResult,
-    InlineQueryResultArticle, InlineQueryResultCachedAudio, InlineQueryResultCachedVideo,
-    InlineQueryResultsButton, InlineQueryResultsButtonKind, InputMessageContent,
-    InputMessageContentText, ParseMode,
+    InlineQueryResultArticle, InlineQueryResultAudio, InlineQueryResultCachedAudio,
+    InlineQueryResultCachedVideo, InlineQueryResultsButton, InlineQueryResultsButtonKind,
+    InputMessageContent, InputMessageContentText, ParseMode, Seconds,
 };
 
 use crate::cache::MediaCache;
 use crate::config::Config;
 use crate::providers::pornhub::search_pornhub_videos;
 use crate::providers::soundcloud::{search_soundcloud_tracks, SoundcloudTrackInfo};
-use crate::providers::yandex::{search_yandex_tracks, YandexTrackInfo};
+use crate::providers::yandex::{fetch_direct_mp3_url, search_yandex_tracks, YandexTrackInfo};
 use crate::providers::youtube::{search_youtube_videos, YouTubeVideoInfo};
 use crate::settings::{DefaultSearchProvider, InlineProviderPreference, UserSettingsStore};
 
@@ -104,7 +104,7 @@ pub async fn handle_inline_query(
     match target {
         InlineTargetProvider::Yandex => {
             if let Ok(tracks) = search_yandex_tracks(query_text, config.yandex_music_token.as_deref()).await {
-                results.extend(format_yandex_results(&tracks, &cache, user_settings.inline_instant_cached, bot_username));
+                results.extend(format_yandex_results(&tracks, &cache, user_settings.inline_instant_cached, bot_username, config.yandex_music_token.as_deref()).await);
             }
         }
         InlineTargetProvider::SoundCloud => {
@@ -166,7 +166,7 @@ pub async fn handle_inline_query(
                     match user_settings.default_search {
                         DefaultSearchProvider::Yandex => {
                             if let Ok(tracks) = search_yandex_tracks(query_text, config.yandex_music_token.as_deref()).await {
-                                results.extend(format_yandex_results(&tracks, &cache, user_settings.inline_instant_cached, bot_username));
+                                results.extend(format_yandex_results(&tracks, &cache, user_settings.inline_instant_cached, bot_username, config.yandex_music_token.as_deref()).await);
                             }
                         }
                         DefaultSearchProvider::SoundCloud => {
@@ -183,7 +183,7 @@ pub async fn handle_inline_query(
                 }
                 InlineProviderPreference::Yandex => {
                     if let Ok(tracks) = search_yandex_tracks(query_text, config.yandex_music_token.as_deref()).await {
-                        results.extend(format_yandex_results(&tracks, &cache, user_settings.inline_instant_cached, bot_username));
+                        results.extend(format_yandex_results(&tracks, &cache, user_settings.inline_instant_cached, bot_username, config.yandex_music_token.as_deref()).await);
                     }
                 }
                 InlineProviderPreference::SoundCloud => {
@@ -202,7 +202,7 @@ pub async fn handle_inline_query(
                     let (ym_res, yt_res) = tokio::join!(ym_fut, yt_fut);
 
                     let ym_items = match ym_res {
-                        Ok(t) => format_yandex_results(&t, &cache, user_settings.inline_instant_cached, bot_username),
+                        Ok(t) => format_yandex_results(&t, &cache, user_settings.inline_instant_cached, bot_username, config.yandex_music_token.as_deref()).await,
                         Err(_) => Vec::new(),
                     };
                     let yt_items = match yt_res {
@@ -328,37 +328,87 @@ fn build_empty_query_results(bot_username: &str) -> Vec<InlineQueryResult> {
     ]
 }
 
-fn format_yandex_results(
+async fn format_yandex_results(
     tracks: &[YandexTrackInfo],
     cache: &MediaCache,
     instant_cached: bool,
     bot_username: &str,
+    ym_token: Option<&str>,
 ) -> Vec<InlineQueryResult> {
-    let mut results = Vec::with_capacity(tracks.len());
+    let mut results: Vec<(usize, InlineQueryResult)> = Vec::with_capacity(tracks.len());
+    let mut uncached_indices = Vec::new();
 
     for (idx, track) in tracks.iter().enumerate() {
         let url = track.canonical_url();
-        let url_id = cache.register_url(&url);
 
-        // Check cache for instant delivery
+        // 1. Check cache for instant delivery
         if instant_cached {
             if let Some(file_id) = cache.get_cached_audio_file_id(&url) {
                 let cached_audio = InlineQueryResultCachedAudio::new(
                     format!("ym_{}_{}", track.id, idx),
                     file_id,
                 );
-                results.push(InlineQueryResult::CachedAudio(cached_audio));
+                results.push((idx, InlineQueryResult::CachedAudio(cached_audio)));
                 continue;
             }
         }
+        uncached_indices.push(idx);
+    }
 
-        // Fallback: Article card with download button
+    // 2. For uncached tracks, fetch direct MP3 stream URLs concurrently with a 1.5s timeout
+    let direct_url_futs: Vec<_> = uncached_indices
+        .iter()
+        .map(|&idx| {
+            let track_id = tracks[idx].id.clone();
+            async move {
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(1500),
+                    fetch_direct_mp3_url(&track_id, ym_token),
+                )
+                .await
+            }
+        })
+        .collect();
+
+    let direct_urls = futures::future::join_all(direct_url_futs).await;
+
+    for (&idx, direct_res) in uncached_indices.iter().zip(direct_urls.into_iter()) {
+        let track = &tracks[idx];
+        let url = track.canonical_url();
+        let url_id = cache.register_url(&url);
+
         let artists_str = if track.artists.is_empty() {
             "Неизвестный исполнитель".to_string()
         } else {
             track.artists.join(", ")
         };
 
+        let duration_secs = track.duration_ms.map(|ms| (ms / 1000) as u32).unwrap_or(0);
+
+        // If direct MP3 stream URL is available, send as InlineQueryResultAudio so Telegram
+        // downloads and sends the audio file directly into the chat/group!
+        let direct_mp3_opt = match direct_res {
+            Ok(Ok(direct_url)) => reqwest::Url::parse(&direct_url).ok(),
+            _ => None,
+        };
+
+        if let Some(mp3_url) = direct_mp3_opt {
+            let mut audio_item = InlineQueryResultAudio::new(
+                format!("ym_{}_{}", track.id, idx),
+                mp3_url,
+                &track.title,
+            )
+            .performer(&artists_str);
+
+            if duration_secs > 0 {
+                audio_item = audio_item.audio_duration(Seconds::from_seconds(duration_secs));
+            }
+
+            results.push((idx, InlineQueryResult::Audio(audio_item)));
+            continue;
+        }
+
+        // Fallback: Article card with download button
         let duration_str = match track.duration_ms {
             Some(ms) if ms > 0 => {
                 let total_secs = ms / 1000;
@@ -382,7 +432,10 @@ fn format_yandex_results(
         if let Ok(u) = dl_url.parse() {
             keyboard_rows.push(vec![
                 InlineKeyboardButton::url("⬇️ Скачать трек в боте", u),
-                InlineKeyboardButton::url("🎧 В Яндекс Музыке", url.parse().unwrap_or_else(|_| "https://music.yandex.ru".parse().unwrap())),
+                InlineKeyboardButton::url(
+                    "🎧 В Яндекс Музыке",
+                    url.parse().unwrap_or_else(|_| "https://music.yandex.ru".parse().unwrap()),
+                ),
             ]);
         }
 
@@ -405,10 +458,11 @@ fn format_yandex_results(
             article.reply_markup = Some(InlineKeyboardMarkup::new(keyboard_rows));
         }
 
-        results.push(InlineQueryResult::Article(article));
+        results.push((idx, InlineQueryResult::Article(article)));
     }
 
-    results
+    results.sort_by_key(|&(idx, _)| idx);
+    results.into_iter().map(|(_, item)| item).collect()
 }
 
 fn format_soundcloud_results(
@@ -592,8 +646,8 @@ mod tests {
         assert_eq!(get_bot_username(), Some("test_edibls_bot"));
     }
 
-    #[test]
-    fn test_format_yandex_results_cached_vs_article() {
+    #[tokio::test]
+    async fn test_format_yandex_results_cached_vs_article() {
         use crate::cache::CachedMedia;
         use teloxide::types::FileId;
 
@@ -607,8 +661,8 @@ mod tests {
             cover_uri: Some("avatars.yandex.net/get-music-content/123/%%".to_string()),
         };
 
-        // 1. Uncached track -> Article
-        let results_uncached = format_yandex_results(&[track.clone()], &cache, true, "test_bot");
+        // 1. Uncached track without token -> Fallback to Article card
+        let results_uncached = format_yandex_results(&[track.clone()], &cache, true, "test_bot", None).await;
         assert_eq!(results_uncached.len(), 1);
         match &results_uncached[0] {
             InlineQueryResult::Article(article) => {
@@ -619,7 +673,7 @@ mod tests {
                 let dl_btn = &kb.inline_keyboard[0][0];
                 assert!(dl_btn.text.contains("Скачать трек"));
             }
-            _ => panic!("Expected Article for uncached track"),
+            _ => panic!("Expected Article for uncached track without token"),
         }
 
         // 2. Cached track with instant_cached = true -> CachedAudio
@@ -633,7 +687,7 @@ mod tests {
             5000,
         );
 
-        let results_cached = format_yandex_results(&[track.clone()], &cache, true, "test_bot");
+        let results_cached = format_yandex_results(&[track.clone()], &cache, true, "test_bot", None).await;
         assert_eq!(results_cached.len(), 1);
         match &results_cached[0] {
             InlineQueryResult::CachedAudio(audio) => {
@@ -643,7 +697,7 @@ mod tests {
         }
 
         // 3. Cached track with instant_cached = false -> Fallback Article
-        let results_cached_disabled = format_yandex_results(&[track], &cache, false, "test_bot");
+        let results_cached_disabled = format_yandex_results(&[track], &cache, false, "test_bot", None).await;
         assert_eq!(results_cached_disabled.len(), 1);
         assert!(matches!(results_cached_disabled[0], InlineQueryResult::Article(_)));
     }

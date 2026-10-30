@@ -119,17 +119,7 @@ pub async fn handle_inline_query(
                 }
             }
             InlineTargetProvider::Pornhub => {
-                if !user_settings.inline_allow_nsfw {
-                    let nsfw_disabled = InlineQueryResultArticle::new(
-                        "nsfw_disabled".to_string(),
-                        "🔞 Поиск 18+ отключен в настройках".to_string(),
-                        InputMessageContent::Text(InputMessageContentText::new(
-                            "🛡️ <b>Поиск 18+ контента отключен</b> в ваших настройках инлайн-режима.\n\n\
-                            Чтобы включить, откройте настройки в боте: /settings → 🌐 Инлайн-режим."
-                        ).parse_mode(ParseMode::Html)),
-                    ).description("Нажмите для открытия настроек безопасного поиска");
-                    res.push(InlineQueryResult::Article(nsfw_disabled));
-                } else if let Ok(videos) = search_pornhub_videos(query_text).await {
+                if let Ok(videos) = search_pornhub_videos(query_text).await {
                     for (idx, vid) in videos.into_iter().enumerate() {
                         let url = vid.canonical_url();
                         let url_id = cache.register_url(&url);

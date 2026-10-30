@@ -559,7 +559,7 @@ pub async fn process_and_send_media(
         let dl_shown_clone = Arc::clone(&dl_shown_pct);
         let dl_user_id = user_id;
         let dl_updater = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(400));
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(1500));
             interval.tick().await;
             let mut last_pct = 0u8;
             loop {
@@ -818,17 +818,32 @@ pub async fn process_and_send_media(
                         input_file = input_file.file_name(name);
                     }
 
-                    let mut request = bot
-                        .send_document(chat_id, input_file)
-                        .disable_content_type_detection(true)
-                        .reply_markup(reply_markup.clone());
+                    let send_doc_fut = async {
+                        let mut attempts = 0;
+                        loop {
+                            let mut request = bot
+                                .send_document(chat_id, input_file.clone())
+                                .disable_content_type_detection(true)
+                                .reply_markup(reply_markup.clone());
 
-                    if let Some(msg_id) = reply_to {
-                        request = request.reply_parameters(ReplyParameters::new(msg_id));
-                    }
-                    if let Some(cover_path) = &track.cover_path {
-                        request = request.thumbnail(InputFile::file(cover_path));
-                    }
+                            if let Some(msg_id) = reply_to {
+                                request = request.reply_parameters(ReplyParameters::new(msg_id));
+                            }
+                            if let Some(cover_path) = &track.cover_path {
+                                request = request.thumbnail(InputFile::file(cover_path));
+                            }
+
+                            match request.await {
+                                Ok(msg) => return Ok(msg),
+                                Err(teloxide::RequestError::RetryAfter(dur)) if attempts < 3 => {
+                                    log::warn!("Telegram rate limit hit during audio doc send ({:?}); retrying in {:?}", dur, dur);
+                                    tokio::time::sleep(dur.duration() + std::time::Duration::from_millis(500)).await;
+                                    attempts += 1;
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        }
+                    };
 
                     let send_res = tokio::select! {
                         _ = cancel_rx.changed() => {
@@ -836,7 +851,7 @@ pub async fn process_and_send_media(
                             let _ = bot.delete_message(chat_id, status_msg.id).await;
                             return Ok(());
                         }
-                        res = request => res,
+                        res = send_doc_fut => res,
                     };
 
                     match send_res {
@@ -851,26 +866,41 @@ pub async fn process_and_send_media(
                         }
                     }
                 } else {
-                    let input_file = InputFile::file(&track.path);
-                    let mut request = bot
-                        .send_audio(chat_id, input_file)
-                        .reply_markup(reply_markup.clone());
+                    let send_audio_fut = async {
+                        let mut attempts = 0;
+                        loop {
+                            let input_file = InputFile::file(&track.path);
+                            let mut request = bot
+                                .send_audio(chat_id, input_file)
+                                .reply_markup(reply_markup.clone());
 
-                    if let Some(msg_id) = reply_to {
-                        request = request.reply_parameters(ReplyParameters::new(msg_id));
-                    }
-                    if let Some(p) = &track.performer {
-                        request = request.performer(p);
-                    }
-                    if let Some(t) = &track.title {
-                        request = request.title(t);
-                    }
-                    if let Some(d) = track.duration_secs {
-                        request = request.duration(d);
-                    }
-                    if let Some(cover_path) = &track.cover_path {
-                        request = request.thumbnail(InputFile::file(cover_path));
-                    }
+                            if let Some(msg_id) = reply_to {
+                                request = request.reply_parameters(ReplyParameters::new(msg_id));
+                            }
+                            if let Some(p) = &track.performer {
+                                request = request.performer(p);
+                            }
+                            if let Some(t) = &track.title {
+                                request = request.title(t);
+                            }
+                            if let Some(d) = track.duration_secs {
+                                request = request.duration(d);
+                            }
+                            if let Some(cover_path) = &track.cover_path {
+                                request = request.thumbnail(InputFile::file(cover_path));
+                            }
+
+                            match request.await {
+                                Ok(msg) => return Ok(msg),
+                                Err(teloxide::RequestError::RetryAfter(dur)) if attempts < 3 => {
+                                    log::warn!("Telegram rate limit hit during audio send ({:?}); retrying in {:?}", dur, dur);
+                                    tokio::time::sleep(dur.duration() + std::time::Duration::from_millis(500)).await;
+                                    attempts += 1;
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        }
+                    };
 
                     let send_res = tokio::select! {
                         _ = cancel_rx.changed() => {
@@ -878,7 +908,7 @@ pub async fn process_and_send_media(
                             let _ = bot.delete_message(chat_id, status_msg.id).await;
                             return Ok(());
                         }
-                        res = request => res,
+                        res = send_audio_fut => res,
                     };
 
                     match send_res {
@@ -952,7 +982,7 @@ pub async fn process_and_send_media(
             let ul_msg_id = status_msg.id;
             let ul_user_id = user_id;
             let ul_updater = tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_millis(350));
+                let mut interval = tokio::time::interval(std::time::Duration::from_millis(1500));
                 interval.tick().await;
                 let mut last_pct = 0u8;
                 loop {
@@ -995,56 +1025,69 @@ pub async fn process_and_send_media(
             let reply_markup = build_video_action_buttons(url_id, is_yt && !resulting_subway, resulting_subway);
 
             let send_fut = async {
-                if opts.send_as_document {
-                    let mut input_file = InputFile::file(&file_path);
-                    let ext = file_path
-                        .extension()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("mp4");
-                    if let Some(t) = &video_file.title {
-                        let clean_title: String = t
-                            .chars()
-                            .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '_')
-                            .collect();
-                        let clean_title = clean_title.trim();
-                        if !clean_title.is_empty() {
-                            input_file = input_file.file_name(format!("{clean_title}.{ext}"));
+                let mut attempts = 0;
+                loop {
+                    let res = if opts.send_as_document {
+                        let mut input_file = InputFile::file(&file_path);
+                        let ext = file_path
+                            .extension()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("mp4");
+                        if let Some(t) = &video_file.title {
+                            let clean_title: String = t
+                                .chars()
+                                .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '_')
+                                .collect();
+                            let clean_title = clean_title.trim();
+                            if !clean_title.is_empty() {
+                                input_file = input_file.file_name(format!("{clean_title}.{ext}"));
+                            }
                         }
-                    }
 
-                    let mut request = bot
-                        .send_document(chat_id, input_file)
-                        .disable_content_type_detection(true)
-                        .reply_markup(reply_markup.clone());
+                        let mut request = bot
+                            .send_document(chat_id, input_file)
+                            .disable_content_type_detection(true)
+                            .reply_markup(reply_markup.clone());
 
-                    if let Some(msg_id) = reply_to {
-                        request = request.reply_parameters(ReplyParameters::new(msg_id));
-                    }
-                    if let Some(thumb) = &video_file.thumbnail_path {
-                        request = request.thumbnail(InputFile::file(thumb));
-                    }
-                    request.await
-                } else {
-                    let input_file = InputFile::file(&file_path);
-                    let mut request = bot
-                        .send_video(chat_id, input_file)
-                        .supports_streaming(true)
-                        .reply_markup(reply_markup.clone());
+                        if let Some(msg_id) = reply_to {
+                            request = request.reply_parameters(ReplyParameters::new(msg_id));
+                        }
+                        if let Some(thumb) = &video_file.thumbnail_path {
+                            request = request.thumbnail(InputFile::file(thumb));
+                        }
+                        request.await
+                    } else {
+                        let input_file = InputFile::file(&file_path);
+                        let mut request = bot
+                            .send_video(chat_id, input_file)
+                            .supports_streaming(true)
+                            .reply_markup(reply_markup.clone());
 
-                    if let (Some(w), Some(h)) = (video_file.width, video_file.height) {
-                        request = request.width(w).height(h);
-                    }
-                    if let Some(d) = video_file.duration_secs {
-                        request = request.duration(d);
-                    }
-                    if let Some(thumb) = &video_file.thumbnail_path {
-                        request = request.thumbnail(InputFile::file(thumb));
-                    }
+                        if let (Some(w), Some(h)) = (video_file.width, video_file.height) {
+                            request = request.width(w).height(h);
+                        }
+                        if let Some(d) = video_file.duration_secs {
+                            request = request.duration(d);
+                        }
+                        if let Some(thumb) = &video_file.thumbnail_path {
+                            request = request.thumbnail(InputFile::file(thumb));
+                        }
 
-                    if let Some(msg_id) = reply_to {
-                        request = request.reply_parameters(ReplyParameters::new(msg_id));
+                        if let Some(msg_id) = reply_to {
+                            request = request.reply_parameters(ReplyParameters::new(msg_id));
+                        }
+                        request.await
+                    };
+
+                    match res {
+                        Ok(msg) => return Ok(msg),
+                        Err(teloxide::RequestError::RetryAfter(dur)) if attempts < 3 => {
+                            log::warn!("Telegram rate limit hit during video send ({:?}); retrying...", dur);
+                            tokio::time::sleep(dur.duration() + std::time::Duration::from_millis(500)).await;
+                            attempts += 1;
+                        }
+                        Err(e) => return Err(e),
                     }
-                    request.await
                 }
             };
 
@@ -1144,61 +1187,74 @@ pub async fn process_and_send_media(
                                 .await;
                             let smaller_path = smaller_video.path.clone();
                             let retry_fut = async {
-                                if opts.send_as_document {
-                                    let mut input_file = InputFile::file(&smaller_path);
-                                    let ext = smaller_path
-                                        .extension()
-                                        .and_then(|s| s.to_str())
-                                        .unwrap_or("mp4");
-                                    if let Some(t) = &smaller_video.title {
-                                        let clean_title: String = t
-                                            .chars()
-                                            .filter(|c| {
-                                                c.is_alphanumeric()
-                                                    || *c == ' '
-                                                    || *c == '-'
-                                                    || *c == '_'
-                                            })
-                                            .collect();
-                                        let clean_title = clean_title.trim();
-                                        if !clean_title.is_empty() {
-                                            input_file = input_file
-                                                .file_name(format!("{clean_title}.{ext}"));
+                                let mut attempts = 0;
+                                loop {
+                                    let res = if opts.send_as_document {
+                                        let mut input_file = InputFile::file(&smaller_path);
+                                        let ext = smaller_path
+                                            .extension()
+                                            .and_then(|s| s.to_str())
+                                            .unwrap_or("mp4");
+                                        if let Some(t) = &smaller_video.title {
+                                            let clean_title: String = t
+                                                .chars()
+                                                .filter(|c| {
+                                                    c.is_alphanumeric()
+                                                        || *c == ' '
+                                                        || *c == '-'
+                                                        || *c == '_'
+                                                })
+                                                .collect();
+                                            let clean_title = clean_title.trim();
+                                            if !clean_title.is_empty() {
+                                                input_file = input_file
+                                                    .file_name(format!("{clean_title}.{ext}"));
+                                            }
                                         }
+                                        let mut retry_req = bot
+                                            .send_document(chat_id, input_file)
+                                            .disable_content_type_detection(true)
+                                            .reply_markup(reply_markup.clone());
+                                        if let Some(msg_id) = reply_to {
+                                            retry_req = retry_req
+                                                .reply_parameters(ReplyParameters::new(msg_id));
+                                        }
+                                        if let Some(thumb) = &smaller_video.thumbnail_path {
+                                            retry_req = retry_req.thumbnail(InputFile::file(thumb));
+                                        }
+                                        retry_req.await
+                                    } else {
+                                        let mut retry_req = bot
+                                            .send_video(chat_id, InputFile::file(&smaller_path))
+                                            .supports_streaming(true)
+                                            .reply_markup(reply_markup.clone());
+                                        if let (Some(w), Some(h)) =
+                                            (smaller_video.width, smaller_video.height)
+                                        {
+                                            retry_req = retry_req.width(w).height(h);
+                                        }
+                                        if let Some(d) = smaller_video.duration_secs {
+                                            retry_req = retry_req.duration(d);
+                                        }
+                                        if let Some(thumb) = &smaller_video.thumbnail_path {
+                                            retry_req = retry_req.thumbnail(InputFile::file(thumb));
+                                        }
+                                        if let Some(msg_id) = reply_to {
+                                            retry_req = retry_req
+                                                .reply_parameters(ReplyParameters::new(msg_id));
+                                        }
+                                        retry_req.await
+                                    };
+
+                                    match res {
+                                        Ok(msg) => return Ok(msg),
+                                        Err(teloxide::RequestError::RetryAfter(dur)) if attempts < 3 => {
+                                            log::warn!("Telegram rate limit hit during fallback video send ({:?}); retrying...", dur);
+                                            tokio::time::sleep(dur.duration() + std::time::Duration::from_millis(500)).await;
+                                            attempts += 1;
+                                        }
+                                        Err(e) => return Err(e),
                                     }
-                                    let mut retry_req = bot
-                                        .send_document(chat_id, input_file)
-                                        .disable_content_type_detection(true)
-                                        .reply_markup(reply_markup.clone());
-                                    if let Some(msg_id) = reply_to {
-                                        retry_req = retry_req
-                                            .reply_parameters(ReplyParameters::new(msg_id));
-                                    }
-                                    if let Some(thumb) = &smaller_video.thumbnail_path {
-                                        retry_req = retry_req.thumbnail(InputFile::file(thumb));
-                                    }
-                                    retry_req.await
-                                } else {
-                                    let mut retry_req = bot
-                                        .send_video(chat_id, InputFile::file(&smaller_path))
-                                        .supports_streaming(true)
-                                        .reply_markup(reply_markup);
-                                    if let (Some(w), Some(h)) =
-                                        (smaller_video.width, smaller_video.height)
-                                    {
-                                        retry_req = retry_req.width(w).height(h);
-                                    }
-                                    if let Some(d) = smaller_video.duration_secs {
-                                        retry_req = retry_req.duration(d);
-                                    }
-                                    if let Some(thumb) = &smaller_video.thumbnail_path {
-                                        retry_req = retry_req.thumbnail(InputFile::file(thumb));
-                                    }
-                                    if let Some(msg_id) = reply_to {
-                                        retry_req = retry_req
-                                            .reply_parameters(ReplyParameters::new(msg_id));
-                                    }
-                                    retry_req.await
                                 }
                             };
 

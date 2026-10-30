@@ -26,13 +26,6 @@ pub fn get_bot_username() -> Option<&'static str> {
     BOT_USERNAME.get().map(|s| s.as_str())
 }
 
-fn escape_html(input: &str) -> String {
-    input
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
 const INLINE_PAGE_SIZE: usize = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,32 +122,25 @@ pub async fn handle_inline_query(
                 if let Ok(videos) = search_pornhub_videos(query_text).await {
                     for (idx, vid) in videos.into_iter().enumerate() {
                         let url = vid.canonical_url();
-                        let url_id = cache.register_url(&url);
-                        let safe_title = escape_html(&vid.title);
-                        let mut article = InlineQueryResultArticle::new(
-                            format!("ph_{}_{}", vid.vkey, idx),
-                            format!("🔞 {}", vid.title),
-                            InputMessageContent::Text(InputMessageContentText::new(format!(
-                                "🔞 <b>{}</b>\n⏱ <b>Длительность:</b> {}\n\n{}",
-                                safe_title,
-                                vid.duration.as_deref().unwrap_or("—"),
-                                url
-                            )).parse_mode(ParseMode::Html)),
-                        ).description(format!("Pornhub • {}", vid.duration.as_deref().unwrap_or("Видео")));
 
-                        let dl_url = format!("https://t.me/{bot_username}?start=dl_{url_id}");
-                        let mut keyboard_rows = vec![];
-                        if let Ok(dl_u) = dl_url.parse() {
-                            if let Ok(site_u) = url.parse() {
-                                keyboard_rows.push(vec![
-                                    InlineKeyboardButton::url("⬇️ Скачать видео", dl_u),
-                                    InlineKeyboardButton::url("🔗 На сайт", site_u),
-                                ]);
+                        if user_settings.inline_instant_cached {
+                            if let Some(video_file_id) = cache.get_cached_video_file_id(&url, None) {
+                                let cached_video = InlineQueryResultCachedVideo::new(
+                                    format!("ph_v_{}_{}", vid.vkey, idx),
+                                    video_file_id,
+                                    format!("🔞 {}", vid.title),
+                                );
+                                res.push(InlineQueryResult::CachedVideo(cached_video));
+                                continue;
                             }
                         }
-                        if !keyboard_rows.is_empty() {
-                            article.reply_markup = Some(InlineKeyboardMarkup::new(keyboard_rows));
-                        }
+
+                        let article = InlineQueryResultArticle::new(
+                            format!("ph_{}_{}", vid.vkey, idx),
+                            format!("🔞 {}", vid.title),
+                            InputMessageContent::Text(InputMessageContentText::new(url)),
+                        ).description(format!("Pornhub • {}", vid.duration.as_deref().unwrap_or("Видео")));
+
                         res.push(InlineQueryResult::Article(article));
                     }
                 }
@@ -440,8 +426,8 @@ fn build_yandex_article_card(
     track: &YandexTrackInfo,
     idx: usize,
     artists_str: &str,
-    cache: &MediaCache,
-    bot_username: &str,
+    _cache: &MediaCache,
+    _bot_username: &str,
 ) -> InlineQueryResultArticle {
     let duration_str = match track.duration_ms {
         Some(ms) if ms > 0 => {
@@ -453,37 +439,11 @@ fn build_yandex_article_card(
         _ => "—".to_string(),
     };
 
-    let safe_artists = escape_html(artists_str);
-    let safe_title = escape_html(&track.title);
-
-    let message_text = format!(
-        "🎵 <b>{} — {}</b>\n\
-        ⏱ <b>Длительность:</b> {}\n\
-        💿 <b>Источник:</b> <i>Яндекс Музыка</i>\n\n\
-        <i>Нажмите кнопку ниже, чтобы получить трек через бота:</i>",
-        safe_artists, safe_title, duration_str
-    );
-
     let url = track.canonical_url();
-    let url_id = cache.register_url(&url);
-    let dl_url = format!("https://t.me/{bot_username}?start=dl_{url_id}");
-    let mut keyboard_rows = vec![];
-    if let Ok(u) = dl_url.parse() {
-        keyboard_rows.push(vec![
-            InlineKeyboardButton::url("⬇️ Скачать трек в боте", u),
-            InlineKeyboardButton::url(
-                "🎧 В Яндекс Музыке",
-                url.parse().unwrap_or_else(|_| "https://music.yandex.ru".parse().unwrap()),
-            ),
-        ]);
-    }
-
     let mut article = InlineQueryResultArticle::new(
         format!("ym_{}_{}", track.id, idx),
         format!("🎵 {} — {}", artists_str, track.title),
-        InputMessageContent::Text(
-            InputMessageContentText::new(message_text).parse_mode(ParseMode::Html),
-        ),
+        InputMessageContent::Text(InputMessageContentText::new(url)),
     )
     .description(format!("{} • [{}] • Яндекс Музыка", artists_str, duration_str));
 
@@ -493,10 +453,6 @@ fn build_yandex_article_card(
         }
     }
 
-    if !keyboard_rows.is_empty() {
-        article.reply_markup = Some(InlineKeyboardMarkup::new(keyboard_rows));
-    }
-
     article
 }
 
@@ -504,13 +460,11 @@ fn format_soundcloud_results(
     tracks: &[SoundcloudTrackInfo],
     cache: &MediaCache,
     instant_cached: bool,
-    bot_username: &str,
+    _bot_username: &str,
 ) -> Vec<InlineQueryResult> {
     let mut results = Vec::with_capacity(tracks.len());
 
     for (idx, track) in tracks.iter().enumerate() {
-        let url_id = cache.register_url(&track.url);
-
         if instant_cached {
             if let Some(file_id) = cache.get_cached_audio_file_id(&track.url) {
                 let cached_audio = InlineQueryResultCachedAudio::new(
@@ -525,38 +479,12 @@ fn format_soundcloud_results(
         let uploader_str = track.uploader.as_deref().unwrap_or("SoundCloud");
         let dur_str = track.duration_str.as_deref().unwrap_or("—");
 
-        let safe_uploader = escape_html(uploader_str);
-        let safe_title = escape_html(&track.title);
-
-        let message_text = format!(
-            "☁️ <b>{} — {}</b>\n\
-            ⏱ <b>Длительность:</b> {}\n\
-            💿 <b>Источник:</b> <i>SoundCloud</i>\n\n\
-            <i>Нажмите кнопку ниже, чтобы получить трек через бота:</i>",
-            safe_uploader, safe_title, dur_str
-        );
-
-        let dl_url = format!("https://t.me/{bot_username}?start=dl_{url_id}");
-        let mut keyboard_rows = vec![];
-        if let Ok(u) = dl_url.parse() {
-            keyboard_rows.push(vec![
-                InlineKeyboardButton::url("⬇️ Скачать трек в боте", u),
-                InlineKeyboardButton::url("🎧 В SoundCloud", track.url.parse().unwrap_or_else(|_| "https://soundcloud.com".parse().unwrap())),
-            ]);
-        }
-
-        let mut article = InlineQueryResultArticle::new(
+        let article = InlineQueryResultArticle::new(
             format!("sc_{}_{}", track.id, idx),
             format!("☁️ {} — {}", uploader_str, track.title),
-            InputMessageContent::Text(
-                InputMessageContentText::new(message_text).parse_mode(ParseMode::Html),
-            ),
+            InputMessageContent::Text(InputMessageContentText::new(track.url.clone())),
         )
         .description(format!("{} • [{}] • SoundCloud", uploader_str, dur_str));
-
-        if !keyboard_rows.is_empty() {
-            article.reply_markup = Some(InlineKeyboardMarkup::new(keyboard_rows));
-        }
 
         results.push(InlineQueryResult::Article(article));
     }
@@ -568,13 +496,11 @@ fn format_youtube_results(
     videos: &[YouTubeVideoInfo],
     cache: &MediaCache,
     instant_cached: bool,
-    bot_username: &str,
+    _bot_username: &str,
 ) -> Vec<InlineQueryResult> {
     let mut results = Vec::with_capacity(videos.len());
 
     for (idx, vid) in videos.iter().enumerate() {
-        let url_id = cache.register_url(&vid.url);
-
         if instant_cached {
             if let Some(video_file_id) = cache.get_cached_video_file_id(&vid.url, None) {
                 let cached_video = InlineQueryResultCachedVideo::new(
@@ -597,42 +523,15 @@ fn format_youtube_results(
         let channel_str = vid.uploader.as_deref().unwrap_or("YouTube");
         let dur_str = vid.duration_str.as_deref().unwrap_or("—");
 
-        let safe_title = escape_html(&vid.title);
-        let safe_channel = escape_html(channel_str);
-
-        let message_text = format!(
-            "🎬 <b>{}</b>\n\
-            👤 <b>Канал:</b> {}\n\
-            ⏱ <b>Длительность:</b> {}\n\
-            🔗 {}\n\n\
-            <i>Нажмите кнопку ниже, чтобы скачать видео или аудио:</i>",
-            safe_title, safe_channel, dur_str, vid.url
-        );
-
-        let dl_url = format!("https://t.me/{bot_username}?start=dl_{url_id}");
-        let mut keyboard_rows = vec![];
-        if let Ok(u) = dl_url.parse() {
-            keyboard_rows.push(vec![
-                InlineKeyboardButton::url("⬇️ Скачать в боте", u),
-                InlineKeyboardButton::url("▶️ Смотреть на YouTube", vid.url.parse().unwrap_or_else(|_| "https://youtube.com".parse().unwrap())),
-            ]);
-        }
-
         let mut article = InlineQueryResultArticle::new(
             format!("yt_{}_{}", vid.id, idx),
             format!("🎬 {}", vid.title),
-            InputMessageContent::Text(
-                InputMessageContentText::new(message_text).parse_mode(ParseMode::Html),
-            ),
+            InputMessageContent::Text(InputMessageContentText::new(vid.url.clone())),
         )
         .description(format!("{} • [{}] • YouTube", channel_str, dur_str));
 
         if let Ok(thumb_url) = reqwest::Url::parse(&vid.thumbnail_url()) {
             article.thumbnail_url = Some(thumb_url);
-        }
-
-        if !keyboard_rows.is_empty() {
-            article.reply_markup = Some(InlineKeyboardMarkup::new(keyboard_rows));
         }
 
         results.push(InlineQueryResult::Article(article));
@@ -710,9 +609,12 @@ mod tests {
                 assert!(article.title.contains("Test Artist — Test Track"));
                 assert!(article.description.as_deref().unwrap().contains("3:35"));
                 assert!(article.thumbnail_url.as_ref().unwrap().as_str().contains("200x200"));
-                let kb = article.reply_markup.as_ref().unwrap();
-                let dl_btn = &kb.inline_keyboard[0][0];
-                assert!(dl_btn.text.contains("Скачать трек"));
+                match &article.input_message_content {
+                    InputMessageContent::Text(text) => {
+                        assert_eq!(text.message_text, track.canonical_url());
+                    }
+                    _ => panic!("Expected InputMessageContent::Text"),
+                }
             }
             _ => panic!("Expected Article for uncached track"),
         }

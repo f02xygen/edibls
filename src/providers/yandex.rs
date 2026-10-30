@@ -1,11 +1,12 @@
 use anyhow::{Context, Result, anyhow};
 use md5::{Digest, Md5};
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
@@ -129,11 +130,34 @@ fn ym_http_client() -> &'static reqwest::Client {
     })
 }
 
+#[derive(Clone)]
+struct SearchCacheEntry {
+    results: Vec<YandexTrackInfo>,
+    expires_at: Instant,
+}
+
+static SEARCH_CACHE: OnceLock<RwLock<HashMap<String, SearchCacheEntry>>> = OnceLock::new();
+
+fn get_search_cache() -> &'static RwLock<HashMap<String, SearchCacheEntry>> {
+    SEARCH_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
 /// Searches Yandex Music tracks by query, applying artist-aware filtering and compilation deduplication.
 pub async fn search_yandex_tracks(
     query: &str,
     token: Option<&str>,
 ) -> Result<Vec<YandexTrackInfo>> {
+    let normalized = query.trim().to_lowercase();
+    let now = Instant::now();
+
+    if let Ok(guard) = get_search_cache().read() {
+        if let Some(entry) = guard.get(&normalized) {
+            if entry.expires_at > now {
+                return Ok(entry.results.clone());
+            }
+        }
+    }
+
     let client = ym_http_client();
 
     let mut req = client
@@ -201,7 +225,22 @@ pub async fn search_yandex_tracks(
         });
     }
 
-    Ok(filter_and_dedup_tracks(query, tracks))
+    let filtered = filter_and_dedup_tracks(query, tracks);
+
+    if let Ok(mut guard) = get_search_cache().write() {
+        if guard.len() > 1000 {
+            guard.retain(|_, v| v.expires_at > now);
+        }
+        guard.insert(
+            normalized,
+            SearchCacheEntry {
+                results: filtered.clone(),
+                expires_at: now + Duration::from_secs(300),
+            },
+        );
+    }
+
+    Ok(filtered)
 }
 
 pub fn extract_xml_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
@@ -213,6 +252,7 @@ pub fn extract_xml_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
 }
 
 /// Fetches the direct public MP3 streaming URL for a given track from Yandex Music API.
+#[allow(dead_code)]
 pub async fn fetch_direct_mp3_url(track_id: &str, token: Option<&str>) -> Result<String> {
     let client = reqwest::Client::new();
     let url = format!("https://api.music.yandex.net/tracks/{track_id}/download-info");

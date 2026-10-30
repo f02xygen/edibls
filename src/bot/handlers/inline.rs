@@ -3,16 +3,16 @@ use std::sync::OnceLock;
 use teloxide::prelude::*;
 use teloxide::types::{
     InlineKeyboardButton, InlineKeyboardMarkup, InlineQuery, InlineQueryResult,
-    InlineQueryResultArticle, InlineQueryResultAudio, InlineQueryResultCachedAudio,
-    InlineQueryResultCachedVideo, InlineQueryResultsButton, InlineQueryResultsButtonKind,
-    InputMessageContent, InputMessageContentText, ParseMode, Seconds,
+    InlineQueryResultArticle, InlineQueryResultCachedAudio, InlineQueryResultCachedVideo,
+    InlineQueryResultsButton, InlineQueryResultsButtonKind, InputMessageContent,
+    InputMessageContentText, ParseMode,
 };
 
 use crate::cache::MediaCache;
 use crate::config::Config;
 use crate::providers::pornhub::search_pornhub_videos;
 use crate::providers::soundcloud::{search_soundcloud_tracks, SoundcloudTrackInfo};
-use crate::providers::yandex::{fetch_direct_mp3_url, search_yandex_tracks, YandexTrackInfo};
+use crate::providers::yandex::{search_yandex_tracks, YandexTrackInfo};
 use crate::providers::youtube::{search_youtube_videos, YouTubeVideoInfo};
 use crate::settings::{DefaultSearchProvider, InlineProviderPreference, UserSettingsStore};
 
@@ -99,132 +99,139 @@ pub async fn handle_inline_query(
         return Ok(());
     }
 
-    let mut results: Vec<InlineQueryResult> = Vec::new();
+    let search_fut = async {
+        let mut res: Vec<InlineQueryResult> = Vec::new();
 
-    match target {
-        InlineTargetProvider::Yandex => {
-            if let Ok(tracks) = search_yandex_tracks(query_text, config.yandex_music_token.as_deref()).await {
-                results.extend(format_yandex_results(&tracks, &cache, user_settings.inline_instant_cached, bot_username, config.yandex_music_token.as_deref()).await);
-            }
-        }
-        InlineTargetProvider::SoundCloud => {
-            if let Ok(tracks) = search_soundcloud_tracks(query_text).await {
-                results.extend(format_soundcloud_results(&tracks, &cache, user_settings.inline_instant_cached, bot_username));
-            }
-        }
-        InlineTargetProvider::YouTube => {
-            if let Ok(videos) = search_youtube_videos(query_text).await {
-                results.extend(format_youtube_results(&videos, &cache, user_settings.inline_instant_cached, bot_username));
-            }
-        }
-        InlineTargetProvider::Pornhub => {
-            if !user_settings.inline_allow_nsfw {
-                let nsfw_disabled = InlineQueryResultArticle::new(
-                    "nsfw_disabled".to_string(),
-                    "🔞 Поиск 18+ отключен в настройках".to_string(),
-                    InputMessageContent::Text(InputMessageContentText::new(
-                        "🛡️ <b>Поиск 18+ контента отключен</b> в ваших настройках инлайн-режима.\n\n\
-                        Чтобы включить, откройте настройки в боте: /settings → 🌐 Инлайн-режим."
-                    ).parse_mode(ParseMode::Html)),
-                ).description("Нажмите для открытия настроек безопасного поиска");
-                results.push(InlineQueryResult::Article(nsfw_disabled));
-            } else if let Ok(videos) = search_pornhub_videos(query_text).await {
-                for (idx, vid) in videos.into_iter().enumerate() {
-                    let url = vid.canonical_url();
-                    let url_id = cache.register_url(&url);
-                    let mut article = InlineQueryResultArticle::new(
-                        format!("ph_{}_{}", vid.vkey, idx),
-                        format!("🔞 {}", vid.title),
-                        InputMessageContent::Text(InputMessageContentText::new(format!(
-                            "🔞 <b>{}</b>\n⏱ <b>Длительность:</b> {}\n\n{}",
-                            vid.title,
-                            vid.duration.as_deref().unwrap_or("—"),
-                            url
-                        )).parse_mode(ParseMode::Html)),
-                    ).description(format!("Pornhub • {}", vid.duration.as_deref().unwrap_or("Видео")));
-
-                    let dl_url = format!("https://t.me/{bot_username}?start=dl_{url_id}");
-                    let mut keyboard_rows = vec![];
-                    if let Ok(dl_u) = dl_url.parse() {
-                        if let Ok(site_u) = url.parse() {
-                            keyboard_rows.push(vec![
-                                InlineKeyboardButton::url("⬇️ Скачать видео", dl_u),
-                                InlineKeyboardButton::url("🔗 На сайт", site_u),
-                            ]);
-                        }
-                    }
-                    if !keyboard_rows.is_empty() {
-                        article.reply_markup = Some(InlineKeyboardMarkup::new(keyboard_rows));
-                    }
-                    results.push(InlineQueryResult::Article(article));
+        match target {
+            InlineTargetProvider::Yandex => {
+                if let Ok(tracks) = search_yandex_tracks(query_text, config.yandex_music_token.as_deref()).await {
+                    res.extend(format_yandex_results(&tracks, &cache, user_settings.inline_instant_cached, bot_username));
                 }
             }
-        }
-        InlineTargetProvider::DefaultOrMixed => {
-            match user_settings.inline_provider {
-                InlineProviderPreference::UseDefaultSearch => {
-                    match user_settings.default_search {
-                        DefaultSearchProvider::Yandex => {
-                            if let Ok(tracks) = search_yandex_tracks(query_text, config.yandex_music_token.as_deref()).await {
-                                results.extend(format_yandex_results(&tracks, &cache, user_settings.inline_instant_cached, bot_username, config.yandex_music_token.as_deref()).await);
+            InlineTargetProvider::SoundCloud => {
+                if let Ok(tracks) = search_soundcloud_tracks(query_text).await {
+                    res.extend(format_soundcloud_results(&tracks, &cache, user_settings.inline_instant_cached, bot_username));
+                }
+            }
+            InlineTargetProvider::YouTube => {
+                if let Ok(videos) = search_youtube_videos(query_text).await {
+                    res.extend(format_youtube_results(&videos, &cache, user_settings.inline_instant_cached, bot_username));
+                }
+            }
+            InlineTargetProvider::Pornhub => {
+                if !user_settings.inline_allow_nsfw {
+                    let nsfw_disabled = InlineQueryResultArticle::new(
+                        "nsfw_disabled".to_string(),
+                        "🔞 Поиск 18+ отключен в настройках".to_string(),
+                        InputMessageContent::Text(InputMessageContentText::new(
+                            "🛡️ <b>Поиск 18+ контента отключен</b> в ваших настройках инлайн-режима.\n\n\
+                            Чтобы включить, откройте настройки в боте: /settings → 🌐 Инлайн-режим."
+                        ).parse_mode(ParseMode::Html)),
+                    ).description("Нажмите для открытия настроек безопасного поиска");
+                    res.push(InlineQueryResult::Article(nsfw_disabled));
+                } else if let Ok(videos) = search_pornhub_videos(query_text).await {
+                    for (idx, vid) in videos.into_iter().enumerate() {
+                        let url = vid.canonical_url();
+                        let url_id = cache.register_url(&url);
+                        let mut article = InlineQueryResultArticle::new(
+                            format!("ph_{}_{}", vid.vkey, idx),
+                            format!("🔞 {}", vid.title),
+                            InputMessageContent::Text(InputMessageContentText::new(format!(
+                                "🔞 <b>{}</b>\n⏱ <b>Длительность:</b> {}\n\n{}",
+                                vid.title,
+                                vid.duration.as_deref().unwrap_or("—"),
+                                url
+                            )).parse_mode(ParseMode::Html)),
+                        ).description(format!("Pornhub • {}", vid.duration.as_deref().unwrap_or("Видео")));
+
+                        let dl_url = format!("https://t.me/{bot_username}?start=dl_{url_id}");
+                        let mut keyboard_rows = vec![];
+                        if let Ok(dl_u) = dl_url.parse() {
+                            if let Ok(site_u) = url.parse() {
+                                keyboard_rows.push(vec![
+                                    InlineKeyboardButton::url("⬇️ Скачать видео", dl_u),
+                                    InlineKeyboardButton::url("🔗 На сайт", site_u),
+                                ]);
                             }
                         }
-                        DefaultSearchProvider::SoundCloud => {
-                            if let Ok(tracks) = search_soundcloud_tracks(query_text).await {
-                                results.extend(format_soundcloud_results(&tracks, &cache, user_settings.inline_instant_cached, bot_username));
+                        if !keyboard_rows.is_empty() {
+                            article.reply_markup = Some(InlineKeyboardMarkup::new(keyboard_rows));
+                        }
+                        res.push(InlineQueryResult::Article(article));
+                    }
+                }
+            }
+            InlineTargetProvider::DefaultOrMixed => {
+                match user_settings.inline_provider {
+                    InlineProviderPreference::UseDefaultSearch => {
+                        match user_settings.default_search {
+                            DefaultSearchProvider::Yandex => {
+                                if let Ok(tracks) = search_yandex_tracks(query_text, config.yandex_music_token.as_deref()).await {
+                                    res.extend(format_yandex_results(&tracks, &cache, user_settings.inline_instant_cached, bot_username));
+                                }
+                            }
+                            DefaultSearchProvider::SoundCloud => {
+                                if let Ok(tracks) = search_soundcloud_tracks(query_text).await {
+                                    res.extend(format_soundcloud_results(&tracks, &cache, user_settings.inline_instant_cached, bot_username));
+                                }
+                            }
+                            DefaultSearchProvider::YouTube => {
+                                if let Ok(videos) = search_youtube_videos(query_text).await {
+                                    res.extend(format_youtube_results(&videos, &cache, user_settings.inline_instant_cached, bot_username));
+                                }
                             }
                         }
-                        DefaultSearchProvider::YouTube => {
-                            if let Ok(videos) = search_youtube_videos(query_text).await {
-                                results.extend(format_youtube_results(&videos, &cache, user_settings.inline_instant_cached, bot_username));
+                    }
+                    InlineProviderPreference::Yandex => {
+                        if let Ok(tracks) = search_yandex_tracks(query_text, config.yandex_music_token.as_deref()).await {
+                            res.extend(format_yandex_results(&tracks, &cache, user_settings.inline_instant_cached, bot_username));
+                        }
+                    }
+                    InlineProviderPreference::SoundCloud => {
+                        if let Ok(tracks) = search_soundcloud_tracks(query_text).await {
+                            res.extend(format_soundcloud_results(&tracks, &cache, user_settings.inline_instant_cached, bot_username));
+                        }
+                    }
+                    InlineProviderPreference::YouTube => {
+                        if let Ok(videos) = search_youtube_videos(query_text).await {
+                            res.extend(format_youtube_results(&videos, &cache, user_settings.inline_instant_cached, bot_username));
+                        }
+                    }
+                    InlineProviderPreference::Mixed => {
+                        let ym_fut = search_yandex_tracks(query_text, config.yandex_music_token.as_deref());
+                        let yt_fut = search_youtube_videos(query_text);
+                        let (ym_res, yt_res) = tokio::join!(ym_fut, yt_fut);
+
+                        let ym_items = match ym_res {
+                            Ok(t) => format_yandex_results(&t, &cache, user_settings.inline_instant_cached, bot_username),
+                            Err(_) => Vec::new(),
+                        };
+                        let yt_items = match yt_res {
+                            Ok(v) => format_youtube_results(&v, &cache, user_settings.inline_instant_cached, bot_username),
+                            Err(_) => Vec::new(),
+                        };
+
+                        let mut interleaved = Vec::with_capacity(ym_items.len() + yt_items.len());
+                        let max_len = ym_items.len().max(yt_items.len());
+                        for i in 0..max_len {
+                            if i < ym_items.len() {
+                                interleaved.push(ym_items[i].clone());
+                            }
+                            if i < yt_items.len() {
+                                interleaved.push(yt_items[i].clone());
                             }
                         }
+                        res.extend(interleaved);
                     }
-                }
-                InlineProviderPreference::Yandex => {
-                    if let Ok(tracks) = search_yandex_tracks(query_text, config.yandex_music_token.as_deref()).await {
-                        results.extend(format_yandex_results(&tracks, &cache, user_settings.inline_instant_cached, bot_username, config.yandex_music_token.as_deref()).await);
-                    }
-                }
-                InlineProviderPreference::SoundCloud => {
-                    if let Ok(tracks) = search_soundcloud_tracks(query_text).await {
-                        results.extend(format_soundcloud_results(&tracks, &cache, user_settings.inline_instant_cached, bot_username));
-                    }
-                }
-                InlineProviderPreference::YouTube => {
-                    if let Ok(videos) = search_youtube_videos(query_text).await {
-                        results.extend(format_youtube_results(&videos, &cache, user_settings.inline_instant_cached, bot_username));
-                    }
-                }
-                InlineProviderPreference::Mixed => {
-                    let ym_fut = search_yandex_tracks(query_text, config.yandex_music_token.as_deref());
-                    let yt_fut = search_youtube_videos(query_text);
-                    let (ym_res, yt_res) = tokio::join!(ym_fut, yt_fut);
-
-                    let ym_items = match ym_res {
-                        Ok(t) => format_yandex_results(&t, &cache, user_settings.inline_instant_cached, bot_username, config.yandex_music_token.as_deref()).await,
-                        Err(_) => Vec::new(),
-                    };
-                    let yt_items = match yt_res {
-                        Ok(v) => format_youtube_results(&v, &cache, user_settings.inline_instant_cached, bot_username),
-                        Err(_) => Vec::new(),
-                    };
-
-                    let mut interleaved = Vec::with_capacity(ym_items.len() + yt_items.len());
-                    let max_len = ym_items.len().max(yt_items.len());
-                    for i in 0..max_len {
-                        if i < ym_items.len() {
-                            interleaved.push(ym_items[i].clone());
-                        }
-                        if i < yt_items.len() {
-                            interleaved.push(yt_items[i].clone());
-                        }
-                    }
-                    results.extend(interleaved);
                 }
             }
         }
-    }
+        res
+    };
+
+    let results = tokio::time::timeout(std::time::Duration::from_millis(1500), search_fut)
+        .await
+        .unwrap_or_default();
 
     // Pagination slice
     let total_results = results.len();
@@ -328,15 +335,13 @@ fn build_empty_query_results(bot_username: &str) -> Vec<InlineQueryResult> {
     ]
 }
 
-async fn format_yandex_results(
+fn format_yandex_results(
     tracks: &[YandexTrackInfo],
     cache: &MediaCache,
     instant_cached: bool,
     bot_username: &str,
-    ym_token: Option<&str>,
 ) -> Vec<InlineQueryResult> {
-    let mut results: Vec<(usize, InlineQueryResult)> = Vec::with_capacity(tracks.len());
-    let mut uncached_indices = Vec::new();
+    let mut results: Vec<InlineQueryResult> = Vec::with_capacity(tracks.len());
 
     for (idx, track) in tracks.iter().enumerate() {
         let url = track.canonical_url();
@@ -348,67 +353,18 @@ async fn format_yandex_results(
                     format!("ym_{}_{}", track.id, idx),
                     file_id,
                 );
-                results.push((idx, InlineQueryResult::CachedAudio(cached_audio)));
+                results.push(InlineQueryResult::CachedAudio(cached_audio));
                 continue;
             }
         }
-        uncached_indices.push(idx);
-    }
 
-    // 2. For uncached tracks, fetch direct MP3 stream URLs concurrently with a 1.5s timeout
-    let direct_url_futs: Vec<_> = uncached_indices
-        .iter()
-        .map(|&idx| {
-            let track_id = tracks[idx].id.clone();
-            async move {
-                tokio::time::timeout(
-                    std::time::Duration::from_millis(1500),
-                    fetch_direct_mp3_url(&track_id, ym_token),
-                )
-                .await
-            }
-        })
-        .collect();
-
-    let direct_urls = futures::future::join_all(direct_url_futs).await;
-
-    for (&idx, direct_res) in uncached_indices.iter().zip(direct_urls.into_iter()) {
-        let track = &tracks[idx];
-        let url = track.canonical_url();
-        let url_id = cache.register_url(&url);
-
+        // 2. Uncached track: Return rich Article card with thumbnail cover
         let artists_str = if track.artists.is_empty() {
             "Неизвестный исполнитель".to_string()
         } else {
             track.artists.join(", ")
         };
 
-        let duration_secs = track.duration_ms.map(|ms| (ms / 1000) as u32).unwrap_or(0);
-
-        // If direct MP3 stream URL is available, send as InlineQueryResultAudio so Telegram
-        // downloads and sends the audio file directly into the chat/group!
-        let direct_mp3_opt = match direct_res {
-            Ok(Ok(direct_url)) => reqwest::Url::parse(&direct_url).ok(),
-            _ => None,
-        };
-
-        if let Some(mp3_url) = direct_mp3_opt {
-            let mut audio_item = InlineQueryResultAudio::new(
-                format!("ym_{}_{}", track.id, idx),
-                mp3_url,
-                &track.title,
-            )
-            .performer(&artists_str);
-
-            if duration_secs > 0 {
-                audio_item = audio_item.audio_duration(Seconds::from_seconds(duration_secs));
-            }
-
-            results.push((idx, InlineQueryResult::Audio(audio_item)));
-            continue;
-        }
-
-        // Fallback: Article card with download button
         let duration_str = match track.duration_ms {
             Some(ms) if ms > 0 => {
                 let total_secs = ms / 1000;
@@ -427,6 +383,7 @@ async fn format_yandex_results(
             artists_str, track.title, duration_str
         );
 
+        let url_id = cache.register_url(&url);
         let dl_url = format!("https://t.me/{bot_username}?start=dl_{url_id}");
         let mut keyboard_rows = vec![];
         if let Ok(u) = dl_url.parse() {
@@ -458,11 +415,10 @@ async fn format_yandex_results(
             article.reply_markup = Some(InlineKeyboardMarkup::new(keyboard_rows));
         }
 
-        results.push((idx, InlineQueryResult::Article(article)));
+        results.push(InlineQueryResult::Article(article));
     }
 
-    results.sort_by_key(|&(idx, _)| idx);
-    results.into_iter().map(|(_, item)| item).collect()
+    results
 }
 
 fn format_soundcloud_results(
@@ -661,8 +617,8 @@ mod tests {
             cover_uri: Some("avatars.yandex.net/get-music-content/123/%%".to_string()),
         };
 
-        // 1. Uncached track without token -> Fallback to Article card
-        let results_uncached = format_yandex_results(&[track.clone()], &cache, true, "test_bot", None).await;
+        // 1. Uncached track -> Article card with cover thumbnail
+        let results_uncached = format_yandex_results(&[track.clone()], &cache, true, "test_bot");
         assert_eq!(results_uncached.len(), 1);
         match &results_uncached[0] {
             InlineQueryResult::Article(article) => {
@@ -673,7 +629,7 @@ mod tests {
                 let dl_btn = &kb.inline_keyboard[0][0];
                 assert!(dl_btn.text.contains("Скачать трек"));
             }
-            _ => panic!("Expected Article for uncached track without token"),
+            _ => panic!("Expected Article for uncached track"),
         }
 
         // 2. Cached track with instant_cached = true -> CachedAudio
@@ -687,7 +643,7 @@ mod tests {
             5000,
         );
 
-        let results_cached = format_yandex_results(&[track.clone()], &cache, true, "test_bot", None).await;
+        let results_cached = format_yandex_results(&[track.clone()], &cache, true, "test_bot");
         assert_eq!(results_cached.len(), 1);
         match &results_cached[0] {
             InlineQueryResult::CachedAudio(audio) => {
@@ -697,7 +653,7 @@ mod tests {
         }
 
         // 3. Cached track with instant_cached = false -> Fallback Article
-        let results_cached_disabled = format_yandex_results(&[track], &cache, false, "test_bot", None).await;
+        let results_cached_disabled = format_yandex_results(&[track], &cache, false, "test_bot");
         assert_eq!(results_cached_disabled.len(), 1);
         assert!(matches!(results_cached_disabled[0], InlineQueryResult::Article(_)));
     }

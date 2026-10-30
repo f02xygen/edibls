@@ -12,11 +12,12 @@ mod providers;
 mod queue;
 mod settings;
 
-use bot::{handle_callback, handle_message};
+use bot::{handle_callback, handle_inline_query, handle_message, init_bot_username};
 use cache::MediaCache;
 use config::Config;
 use queue::QueueManager;
 use settings::UserSettingsStore;
+use teloxide::types::InlineQuery;
 
 #[tokio::main]
 async fn main() {
@@ -81,72 +82,85 @@ async fn main() {
 
     if connected_api_url.is_none() {
         let local_url = reqwest::Url::parse("http://127.0.0.1:8081").unwrap();
-        if client
-            .get(local_url.clone())
+        // Verify that port 8081 is indeed telegram-bot-api by checking a known endpoint or server header
+        if let Ok(resp) = client
+            .get(local_url.join(&format!("bot{}/getMe", raw_config.teloxide_token)).unwrap_or_else(|_| local_url.clone()))
             .timeout(std::time::Duration::from_secs(1))
             .send()
             .await
-            .is_ok()
         {
-            connected_api_url = Some(local_url);
-        } else {
-            let base_dir = if std::fs::create_dir_all("/app/.telegram-bot-api").is_ok() {
-                std::path::PathBuf::from("/app/.telegram-bot-api")
-            } else {
-                let p = std::env::temp_dir().join("edibls-telegram-bot-api");
-                let _ = std::fs::create_dir_all(&p);
-                p
-            };
-            let temp_dir = base_dir.join("tmp");
-            let _ = std::fs::create_dir_all(&temp_dir);
-
-            let api_id = std::env::var("TELEGRAM_API_ID")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| "2040".to_string());
-            let api_hash = std::env::var("TELEGRAM_API_HASH")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| "b18441a1ff607e10a989891a5462e627".to_string());
-
-            let token_dir = base_dir.join(&raw_config.teloxide_token);
-            if !token_dir.exists() {
-                let logout_url = format!(
-                    "https://api.telegram.org/bot{}/logOut",
-                    raw_config.teloxide_token
-                );
-                let _ = client
-                    .post(&logout_url)
-                    .timeout(std::time::Duration::from_secs(5))
-                    .send()
-                    .await;
+            if resp.status().is_success() {
+                connected_api_url = Some(local_url.clone());
             }
+        }
+        
+        if connected_api_url.is_none() {
+            let binary_exists = tokio::process::Command::new("telegram-bot-api")
+                .arg("--version")
+                .output()
+                .await
+                .map(|o| o.status.success() || !o.stdout.is_empty() || !o.stderr.is_empty())
+                .unwrap_or(false);
 
-            if let Ok(child) = tokio::process::Command::new("telegram-bot-api")
-                .args([
-                    "--local",
-                    &format!("--api-id={api_id}"),
-                    &format!("--api-hash={api_hash}"),
-                    "--http-port=8081",
-                    &format!("--dir={}", base_dir.display()),
-                    &format!("--temp-dir={}", temp_dir.display()),
-                ])
-                .kill_on_drop(true)
-                .spawn()
-            {
-                log::info!("Spawned embedded local telegram-bot-api process on 127.0.0.1:8081");
-                _local_api_child = Some(child);
-                for _ in 1..=10 {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    if client
-                        .get(local_url.clone())
-                        .timeout(std::time::Duration::from_secs(1))
+            if binary_exists {
+                let base_dir = if std::fs::create_dir_all("/app/.telegram-bot-api").is_ok() {
+                    std::path::PathBuf::from("/app/.telegram-bot-api")
+                } else {
+                    let p = std::env::temp_dir().join("edibls-telegram-bot-api");
+                    let _ = std::fs::create_dir_all(&p);
+                    p
+                };
+                let temp_dir = base_dir.join("tmp");
+                let _ = std::fs::create_dir_all(&temp_dir);
+
+                let api_id = std::env::var("TELEGRAM_API_ID")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| "2040".to_string());
+                let api_hash = std::env::var("TELEGRAM_API_HASH")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| "b18441a1ff607e10a989891a5462e627".to_string());
+
+                let token_dir = base_dir.join(&raw_config.teloxide_token);
+                if !token_dir.exists() {
+                    let logout_url = format!(
+                        "https://api.telegram.org/bot{}/logOut",
+                        raw_config.teloxide_token
+                    );
+                    let _ = client
+                        .post(&logout_url)
+                        .timeout(std::time::Duration::from_secs(5))
                         .send()
-                        .await
-                        .is_ok()
-                    {
-                        connected_api_url = Some(local_url);
-                        break;
+                        .await;
+                }
+
+                if let Ok(child) = tokio::process::Command::new("telegram-bot-api")
+                    .args([
+                        "--local",
+                        &format!("--api-id={api_id}"),
+                        &format!("--api-hash={api_hash}"),
+                        "--http-port=8081",
+                        &format!("--dir={}", base_dir.display()),
+                        &format!("--temp-dir={}", temp_dir.display()),
+                    ])
+                    .kill_on_drop(true)
+                    .spawn()
+                {
+                    log::info!("Spawned embedded local telegram-bot-api process on 127.0.0.1:8081");
+                    _local_api_child = Some(child);
+                    for _ in 1..=10 {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        if client
+                            .get(local_url.clone())
+                            .timeout(std::time::Duration::from_secs(1))
+                            .send()
+                            .await
+                            .is_ok()
+                        {
+                            connected_api_url = Some(local_url);
+                            break;
+                        }
                     }
                 }
             }
@@ -197,6 +211,13 @@ async fn main() {
         log::warn!("Failed to register bot commands with Telegram: {:?}", err);
     }
 
+    if let Ok(me) = bot.get_me().await {
+        if let Some(username) = me.username.clone() {
+            log::info!("Bot username: @{}", username);
+            init_bot_username(username);
+        }
+    }
+
     let handler = dptree::entry()
         .branch(Update::filter_message().endpoint(
             move |bot: Bot, msg: Message, config: Arc<Config>, queue: QueueManager, cache: MediaCache, settings: UserSettingsStore| async move {
@@ -213,6 +234,16 @@ async fn main() {
                 tokio::spawn(async move {
                     if let Err(err) = handle_callback(bot, q, config, queue, cache, settings).await {
                         log::error!("Error handling callback query: {:?}", err);
+                    }
+                });
+                respond(())
+            },
+        ))
+        .branch(Update::filter_inline_query().endpoint(
+            move |bot: Bot, q: InlineQuery, config: Arc<Config>, cache: MediaCache, settings: UserSettingsStore| async move {
+                tokio::spawn(async move {
+                    if let Err(err) = handle_inline_query(bot, q, config, cache, settings).await {
+                        log::error!("Error handling inline query: {:?}", err);
                     }
                 });
                 respond(())

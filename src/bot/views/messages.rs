@@ -13,7 +13,8 @@ pub const WELCOME_MESSAGE: &str = "\
 • <b>Subway Surfers:</b> кнопка <code>🛹 + Subway Surfers</code> под видео или <code>/subway &lt;url&gt;</code>.
 • <b>Только аудио:</b> <code>/audio &lt;ссылка&gt;</code> или прямая ссылка на SoundCloud / Яндекс Музыку.
 • <b>Поиск:</b> <code>/yt</code> (YouTube), <code>/sc</code> (SoundCloud), <code>/ym</code> (Яндекс Музыка), <code>/ph</code> (Pornhub).
-• <b>Настройки:</b> <code>/settings</code> (качество, скорость по умолчанию, аудио, отправка файлом, FLAC)
+• <b>Инлайн-режим (@bot):</b> набери <code>@имя_бота &lt;запрос&gt;</code> в любом чате для быстрого поиска музыки и видео (префиксы: <code>ym</code>, <code>sc</code>, <code>yt</code>).
+• <b>Настройки:</b> <code>/settings</code> (качество, скорость по умолчанию, аудио, отправка файлом, FLAC, инлайн-режим)
 
 <i>Поддерживаются медиа в высоком качестве (до 2 ГБ) без водяных знаков.</i>";
 
@@ -52,6 +53,29 @@ pub fn build_settings_text(settings: &UserSettings) -> String {
         📎 <b>Отправка файлом:</b> {doc_desc}\n\n\
         <i>Нажми на кнопку, чтобы переключить:</i>",
         settings.default_speed.label()
+    )
+}
+
+pub fn build_inline_settings_text(settings: &UserSettings) -> String {
+    let prov_desc = settings.inline_provider.label();
+    let instant_desc = if settings.inline_instant_cached {
+        "<b>Включена</b> ⚡ <i>(готовый файл сразу в чат)</i>"
+    } else {
+        "Выключена <i>(всегда карточка со ссылкой)</i>"
+    };
+    let nsfw_desc = if settings.inline_allow_nsfw {
+        "<b>Разрешён</b> ⚠️ <i>(префикс ph доступен)</i>"
+    } else {
+        "Скрыт 🛡️ <i>(безопасный поиск для чатов)</i>"
+    };
+
+    format!(
+        "🌐 <b>Настройки инлайн-режима (@bot)</b>\n\n\
+        Инлайн-режим позволяет искать и отправлять треки и видео прямо в строке ввода любого чата!\n\n\
+        🔍 <b>Поиск без префикса:</b> {prov_desc}\n\
+        ⚡ <b>Мгновенная отправка из кэша:</b> {instant_desc}\n\
+        🔞 <b>18+ контент (Pornhub):</b> {nsfw_desc}\n\n\
+        <i>💡 Префиксы: <code>ym &lt;запрос&gt;</code>, <code>sc &lt;запрос&gt;</code>, <code>yt &lt;запрос&gt;</code> работают всегда.</i>"
     )
 }
 

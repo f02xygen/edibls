@@ -73,6 +73,7 @@ mod tests {
                 version: None,
                 artists: vec!["Artist".to_string()],
                 duration_ms: Some(180000),
+                cover_uri: None,
             })
             .collect();
 
@@ -92,6 +93,7 @@ mod tests {
                 version: None,
                 artists: vec!["Artist".to_string()],
                 duration_ms: Some(180000),
+                cover_uri: None,
             })
             .collect();
 
@@ -193,7 +195,7 @@ mod tests {
     fn test_build_settings_keyboard_and_text() {
         let mut settings = UserSettings::default();
         let kb = build_settings_keyboard(&settings);
-        assert_eq!(kb.inline_keyboard.len(), 7);
+        assert_eq!(kb.inline_keyboard.len(), 8);
         assert_eq!(kb.inline_keyboard[0].len(), 1);
         assert_eq!(kb.inline_keyboard[0][0].text, "🎬 Качество видео: Авто ⚡");
 
@@ -213,7 +215,10 @@ mod tests {
         assert_eq!(kb.inline_keyboard[5][0].text, "📎 Отправка файлом: ВЫКЛ ❌");
 
         assert_eq!(kb.inline_keyboard[6].len(), 1);
-        assert_eq!(kb.inline_keyboard[6][0].text, "✖️ Закрыть");
+        assert_eq!(kb.inline_keyboard[6][0].text, "🌐 Инлайн-режим (@bot) ⚙️");
+
+        assert_eq!(kb.inline_keyboard[7].len(), 1);
+        assert_eq!(kb.inline_keyboard[7][0].text, "✖️ Закрыть");
 
         settings.quality = QualityPreference::AskEveryTime;
         settings.default_speed = crate::settings::SpeedPreference::Faster15;
@@ -234,6 +239,8 @@ mod tests {
         assert_eq!(kb_custom.inline_keyboard[4][0].text, "🎵 Только аудио: ВКЛ ✅");
         assert_eq!(kb_custom.inline_keyboard[5].len(), 1);
         assert_eq!(kb_custom.inline_keyboard[5][0].text, "📎 Отправка файлом: ВКЛ ✅");
+        assert_eq!(kb_custom.inline_keyboard[6].len(), 1);
+        assert_eq!(kb_custom.inline_keyboard[6][0].text, "🌐 Инлайн-режим (@bot) ⚙️");
 
         let text = build_settings_text(&settings);
         assert!(text.contains("Вручную"));
@@ -242,6 +249,19 @@ mod tests {
         assert!(text.contains("SoundCloud"));
         assert!(text.contains("Включён"));
         assert!(text.contains("Включена"));
+
+        // Check inline settings keyboard & text
+        let inline_kb = build_inline_settings_keyboard(&settings);
+        assert_eq!(inline_kb.inline_keyboard.len(), 5);
+        assert_eq!(inline_kb.inline_keyboard[0][0].text, "🔍 Без префикса: Как в поиске (Авто) 🔄");
+        assert_eq!(inline_kb.inline_keyboard[1][0].text, "⚡ Отправка из кэша: ВКЛ ✅");
+        assert_eq!(inline_kb.inline_keyboard[2][0].text, "🔞 Контент 18+ (Pornhub): ВЫКЛ 🛡️");
+        assert_eq!(inline_kb.inline_keyboard[3][0].text, "⬅️ Назад в настройки");
+
+        let inline_text = build_inline_settings_text(&settings);
+        assert!(inline_text.contains("Инлайн-режим"));
+        assert!(inline_text.contains("Включена"));
+        assert!(inline_text.contains("Скрыт"));
     }
 
     #[test]

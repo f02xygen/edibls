@@ -14,6 +14,9 @@ pub enum SettingsToggle {
     DefaultSearch,
     AudioOnly,
     SendAsDocument,
+    InlineProvider,
+    InlineInstant,
+    InlineNsfw,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -22,6 +25,8 @@ pub enum CallbackAction {
     CloseSearch,
     SwitchSearch { target: SearchProviderType, search_id: u64 },
     SettingsClose,
+    SettingsMenuInline,
+    SettingsMenuMain,
     SettingsToggle(SettingsToggle),
     Noop,
     Subway { url_id: u64 },
@@ -78,12 +83,17 @@ impl CallbackAction {
         if let Some(sub) = data.strip_prefix("settings:") {
             return match sub {
                 "close" => Self::SettingsClose,
+                "menu:inline" => Self::SettingsMenuInline,
+                "menu:main" => Self::SettingsMenuMain,
                 "toggle:quality" | "q:auto" | "q:manual" => Self::SettingsToggle(SettingsToggle::Quality),
                 "toggle:speed" => Self::SettingsToggle(SettingsToggle::Speed),
                 "toggle:ym_quality" | "ym:optimal" | "ym:lossless" => Self::SettingsToggle(SettingsToggle::YmQuality),
                 "toggle:search" => Self::SettingsToggle(SettingsToggle::DefaultSearch),
                 "toggle:audio" => Self::SettingsToggle(SettingsToggle::AudioOnly),
                 "toggle:document" => Self::SettingsToggle(SettingsToggle::SendAsDocument),
+                "toggle:inline_provider" => Self::SettingsToggle(SettingsToggle::InlineProvider),
+                "toggle:inline_instant" => Self::SettingsToggle(SettingsToggle::InlineInstant),
+                "toggle:inline_nsfw" => Self::SettingsToggle(SettingsToggle::InlineNsfw),
                 _ => Self::Unknown(data.to_string()),
             };
         }
@@ -318,6 +328,14 @@ mod tests {
         assert_eq!(
             CallbackAction::parse("settings:toggle:speed"),
             CallbackAction::SettingsToggle(SettingsToggle::Speed)
+        );
+        assert_eq!(
+            CallbackAction::parse("settings:menu:inline"),
+            CallbackAction::SettingsMenuInline
+        );
+        assert_eq!(
+            CallbackAction::parse("settings:toggle:inline_provider"),
+            CallbackAction::SettingsToggle(SettingsToggle::InlineProvider)
         );
         assert_eq!(
             CallbackAction::parse("spd:a:42:1.15"),

@@ -197,6 +197,29 @@ pub fn build_settings_keyboard(settings: &UserSettings) -> InlineKeyboardMarkup 
         vec![InlineKeyboardButton::callback(search_label, "settings:toggle:search")],
         vec![InlineKeyboardButton::callback(audio_label, "settings:toggle:audio")],
         vec![InlineKeyboardButton::callback(doc_label, "settings:toggle:document")],
+        vec![InlineKeyboardButton::callback("🌐 Инлайн-режим (@bot) ⚙️", "settings:menu:inline")],
+        vec![InlineKeyboardButton::callback("✖️ Закрыть", "settings:close")],
+    ])
+}
+
+pub fn build_inline_settings_keyboard(settings: &UserSettings) -> InlineKeyboardMarkup {
+    let prov_label = format!("🔍 Без префикса: {}", settings.inline_provider.label());
+    let instant_label = if settings.inline_instant_cached {
+        "⚡ Отправка из кэша: ВКЛ ✅"
+    } else {
+        "⚡ Отправка из кэша: ВЫКЛ ❌"
+    };
+    let nsfw_label = if settings.inline_allow_nsfw {
+        "🔞 Контент 18+ (Pornhub): ВКЛ ⚠️"
+    } else {
+        "🔞 Контент 18+ (Pornhub): ВЫКЛ 🛡️"
+    };
+
+    InlineKeyboardMarkup::new(vec![
+        vec![InlineKeyboardButton::callback(prov_label, "settings:toggle:inline_provider")],
+        vec![InlineKeyboardButton::callback(instant_label, "settings:toggle:inline_instant")],
+        vec![InlineKeyboardButton::callback(nsfw_label, "settings:toggle:inline_nsfw")],
+        vec![InlineKeyboardButton::callback("⬅️ Назад в настройки", "settings:menu:main")],
         vec![InlineKeyboardButton::callback("✖️ Закрыть", "settings:close")],
     ])
 }

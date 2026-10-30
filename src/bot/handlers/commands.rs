@@ -7,7 +7,7 @@ use crate::bot::views::{
 };
 use crate::cache::MediaCache;
 use crate::config::Config;
-use crate::parsing::{extract_speed_modifier, extract_url, parse_media_modifiers};
+use crate::parsing::{extract_speed_modifier, extract_url, is_audio_request, parse_media_modifiers};
 use crate::pipeline::process_and_send_media;
 use crate::providers::youtube::fetch_youtube_chapters;
 use crate::queue::QueueManager;
@@ -29,11 +29,64 @@ pub async fn handle_command(
     cache: &MediaCache,
     settings: &UserSettingsStore,
 ) -> ResponseResult<CommandAction> {
-    if trimmed == "/start"
-        || trimmed.starts_with("/start@")
-        || trimmed == "/help"
-        || trimmed.starts_with("/help@")
-    {
+    if trimmed.starts_with("/start") {
+        let after_cmd = trimmed.strip_prefix("/start").unwrap_or("").trim();
+        let payload = if let Some((_mention, rest)) = after_cmd.split_once(' ') {
+            rest.trim()
+        } else if after_cmd.starts_with('@') {
+            ""
+        } else {
+            after_cmd
+        };
+
+        if payload.starts_with("settings") {
+            let user_settings = settings.get(user_id);
+            bot.send_message(chat_id, build_settings_text(&user_settings))
+                .parse_mode(ParseMode::Html)
+                .reply_markup(build_settings_keyboard(&user_settings))
+                .reply_parameters(ReplyParameters::new(msg_id))
+                .await?;
+            return Ok(CommandAction::Handled);
+        }
+
+        if let Some(dl_id_str) = payload.strip_prefix("dl_") {
+            if let Ok(url_id) = dl_id_str.parse::<u64>() {
+                if let Some(url) = cache.resolve_url(url_id) {
+                    let user_settings = settings.get(user_id);
+                    let mut opts = crate::pipeline::MediaPipelineOptions::new(url);
+                    opts.speed = user_settings.default_speed.to_f32();
+                    opts.ym_quality = user_settings.ym_quality;
+                    opts.send_as_document = user_settings.send_as_document;
+                    opts.audio_only = is_audio_request(&opts.url, "", user_settings.audio_only);
+                    process_and_send_media(
+                        bot,
+                        chat_id,
+                        Some(msg_id),
+                        user_id,
+                        opts,
+                        config,
+                        queue,
+                        cache,
+                    )
+                    .await?;
+                    return Ok(CommandAction::Handled);
+                } else {
+                    bot.send_message(chat_id, "Ссылка устарела. Попробуй найти трек заново через инлайн-поиск.")
+                        .reply_parameters(ReplyParameters::new(msg_id))
+                        .await?;
+                    return Ok(CommandAction::Handled);
+                }
+            }
+        }
+
+        bot.send_message(chat_id, WELCOME_MESSAGE)
+            .parse_mode(ParseMode::Html)
+            .reply_parameters(ReplyParameters::new(msg_id))
+            .await?;
+        return Ok(CommandAction::Handled);
+    }
+
+    if trimmed == "/help" || trimmed.starts_with("/help@") {
         bot.send_message(chat_id, WELCOME_MESSAGE)
             .parse_mode(ParseMode::Html)
             .reply_parameters(ReplyParameters::new(msg_id))

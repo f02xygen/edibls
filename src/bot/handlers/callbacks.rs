@@ -132,8 +132,37 @@ pub async fn handle_callback_action(
                 let _ = bot.delete_message(msg.chat.id, msg.id).await;
             }
         }
+        CallbackAction::SettingsMenuInline => {
+            let _ = bot.answer_callback_query(q.id.clone()).await;
+            if let Some(msg) = q.regular_message() {
+                let user_settings = settings.get(q.from.id);
+                let _ = bot
+                    .edit_message_text(msg.chat.id, msg.id, build_inline_settings_text(&user_settings))
+                    .parse_mode(ParseMode::Html)
+                    .reply_markup(build_inline_settings_keyboard(&user_settings))
+                    .await;
+            }
+        }
+        CallbackAction::SettingsMenuMain => {
+            let _ = bot.answer_callback_query(q.id.clone()).await;
+            if let Some(msg) = q.regular_message() {
+                let user_settings = settings.get(q.from.id);
+                let _ = bot
+                    .edit_message_text(msg.chat.id, msg.id, build_settings_text(&user_settings))
+                    .parse_mode(ParseMode::Html)
+                    .reply_markup(build_settings_keyboard(&user_settings))
+                    .await;
+            }
+        }
         CallbackAction::SettingsToggle(toggle) => {
             let user_id = q.from.id;
+            let is_inline_toggle = matches!(
+                toggle,
+                SettingsToggle::InlineProvider
+                    | SettingsToggle::InlineInstant
+                    | SettingsToggle::InlineNsfw
+            );
+
             let updated = match toggle {
                 SettingsToggle::Quality => settings.toggle_quality(user_id),
                 SettingsToggle::Speed => settings.toggle_speed(user_id),
@@ -141,41 +170,61 @@ pub async fn handle_callback_action(
                 SettingsToggle::DefaultSearch => settings.toggle_default_search(user_id),
                 SettingsToggle::AudioOnly => settings.toggle_audio_only(user_id),
                 SettingsToggle::SendAsDocument => settings.toggle_send_as_document(user_id),
+                SettingsToggle::InlineProvider => settings.toggle_inline_provider(user_id),
+                SettingsToggle::InlineInstant => settings.toggle_inline_instant_cached(user_id),
+                SettingsToggle::InlineNsfw => settings.toggle_inline_allow_nsfw(user_id),
             };
 
             let alert_text = match toggle {
                 SettingsToggle::Quality => match updated.quality {
-                    QualityPreference::AutoBest => "Качество видео: Авто (максимальное)",
-                    QualityPreference::AskEveryTime => "Качество видео: Вручную перед скачиванием",
+                    QualityPreference::AutoBest => "Качество видео: Авто (максимальное)".to_string(),
+                    QualityPreference::AskEveryTime => "Качество видео: Вручную перед скачиванием".to_string(),
                 },
                 SettingsToggle::Speed => match updated.default_speed {
-                    crate::settings::SpeedPreference::Normal => "Скорость по умолчанию: 1.0x (Обычная)",
-                    crate::settings::SpeedPreference::Slower075 => "Скорость по умолчанию: 0.75x",
-                    crate::settings::SpeedPreference::Faster125 => "Скорость по умолчанию: 1.25x",
-                    crate::settings::SpeedPreference::Faster15 => "Скорость по умолчанию: 1.5x",
-                    crate::settings::SpeedPreference::Faster20 => "Скорость по умолчанию: 2.0x",
+                    crate::settings::SpeedPreference::Normal => "Скорость по умолчанию: 1.0x (Обычная)".to_string(),
+                    crate::settings::SpeedPreference::Slower075 => "Скорость по умолчанию: 0.75x".to_string(),
+                    crate::settings::SpeedPreference::Faster125 => "Скорость по умолчанию: 1.25x".to_string(),
+                    crate::settings::SpeedPreference::Faster15 => "Скорость по умолчанию: 1.5x".to_string(),
+                    crate::settings::SpeedPreference::Faster20 => "Скорость по умолчанию: 2.0x".to_string(),
                 },
                 SettingsToggle::YmQuality => match updated.ym_quality {
-                    crate::settings::YandexQualityPreference::Optimal => "Яндекс Музыка: AAC 192 kbps ⚡ (быстро)",
-                    crate::settings::YandexQualityPreference::Lossless => "Яндекс Музыка: FLAC 💎 (lossless)",
+                    crate::settings::YandexQualityPreference::Optimal => "Яндекс Музыка: AAC 192 kbps ⚡ (быстро)".to_string(),
+                    crate::settings::YandexQualityPreference::Lossless => "Яндекс Музыка: FLAC 💎 (lossless)".to_string(),
                 },
                 SettingsToggle::DefaultSearch => match updated.default_search {
-                    DefaultSearchProvider::Yandex => "Поиск по умолчанию: 🎶 Яндекс Музыка",
-                    DefaultSearchProvider::SoundCloud => "Поиск по умолчанию: ☁️ SoundCloud",
-                    DefaultSearchProvider::YouTube => "Поиск по умолчанию: 🎬 YouTube",
+                    DefaultSearchProvider::Yandex => "Поиск по умолчанию: 🎶 Яндекс Музыка".to_string(),
+                    DefaultSearchProvider::SoundCloud => "Поиск по умолчанию: ☁️ SoundCloud".to_string(),
+                    DefaultSearchProvider::YouTube => "Поиск по умолчанию: 🎬 YouTube".to_string(),
                 },
                 SettingsToggle::AudioOnly => {
                     if updated.audio_only {
-                        "Режим «Только аудио» ВКЛЮЧЁН"
+                        "Режим «Только аудио» ВКЛЮЧЁН".to_string()
                     } else {
-                        "Режим «Только аудио» ВЫКЛЮЧЕН"
+                        "Режим «Только аудио» ВЫКЛЮЧЕН".to_string()
                     }
                 }
                 SettingsToggle::SendAsDocument => {
                     if updated.send_as_document {
-                        "Отправка файлом (без сжатия) ВКЛЮЧЕНА"
+                        "Отправка файлом (без сжатия) ВКЛЮЧЕНА".to_string()
                     } else {
-                        "Отправка файлом ВЫКЛЮЧЕНА"
+                        "Отправка файлом ВЫКЛЮЧЕНА".to_string()
+                    }
+                }
+                SettingsToggle::InlineProvider => {
+                    format!("Инлайн-поиск по умолчанию: {}", updated.inline_provider.label())
+                }
+                SettingsToggle::InlineInstant => {
+                    if updated.inline_instant_cached {
+                        "Мгновенная отправка из кэша ВКЛЮЧЕНА ⚡".to_string()
+                    } else {
+                        "Мгновенная отправка из кэша ВЫКЛЮЧЕНА ❌".to_string()
+                    }
+                }
+                SettingsToggle::InlineNsfw => {
+                    if updated.inline_allow_nsfw {
+                        "18+ контент в инлайне РАЗРЕШЁН ⚠️".to_string()
+                    } else {
+                        "18+ контент в инлайне СКРЫТ 🛡️".to_string()
                     }
                 }
             };
@@ -183,11 +232,19 @@ pub async fn handle_callback_action(
             let _ = bot.answer_callback_query(q.id.clone()).text(alert_text).await;
 
             if let Some(msg) = q.regular_message() {
-                let _ = bot
-                    .edit_message_text(msg.chat.id, msg.id, build_settings_text(&updated))
-                    .parse_mode(ParseMode::Html)
-                    .reply_markup(build_settings_keyboard(&updated))
-                    .await;
+                if is_inline_toggle {
+                    let _ = bot
+                        .edit_message_text(msg.chat.id, msg.id, build_inline_settings_text(&updated))
+                        .parse_mode(ParseMode::Html)
+                        .reply_markup(build_inline_settings_keyboard(&updated))
+                        .await;
+                } else {
+                    let _ = bot
+                        .edit_message_text(msg.chat.id, msg.id, build_settings_text(&updated))
+                        .parse_mode(ParseMode::Html)
+                        .reply_markup(build_settings_keyboard(&updated))
+                        .await;
+                }
             }
         }
         CallbackAction::Noop => {

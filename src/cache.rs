@@ -651,6 +651,7 @@ mod tests {
             version: None,
             artists: vec!["Artist".to_string()],
             duration_ms: Some(180000),
+            cover_uri: None,
         };
         let id = cache.store_ym_search("song query".to_string(), vec![track.clone()]);
         assert_ne!(id, 0);

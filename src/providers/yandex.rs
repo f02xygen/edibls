@@ -21,12 +21,25 @@ pub struct YandexTrackInfo {
     pub version: Option<String>,
     pub artists: Vec<String>,
     pub duration_ms: Option<u64>,
+    pub cover_uri: Option<String>,
 }
 
 impl YandexTrackInfo {
     /// Returns the canonical Yandex Music track URL compatible with `yandex-music-downloader` and `MediaCache`.
     pub fn canonical_url(&self) -> String {
         format!("https://music.yandex.ru/track/{}", self.id)
+    }
+
+    /// Formats an HTTPS URL to a 200x200 album cover thumbnail.
+    pub fn cover_url(&self) -> Option<String> {
+        let uri = self.cover_uri.as_deref()?;
+        let uri = uri.trim_start_matches('/');
+        let replaced = uri.replace("%%", "200x200");
+        if replaced.starts_with("http://") || replaced.starts_with("https://") {
+            Some(replaced)
+        } else {
+            Some(format!("https://{replaced}"))
+        }
     }
 
     /// Formats a human-readable label for a Telegram inline keyboard button.
@@ -89,6 +102,8 @@ struct RawYandexTrack {
     available: Option<bool>,
     #[serde(rename = "durationMs")]
     duration_ms: Option<u64>,
+    #[serde(rename = "coverUri")]
+    cover_uri: Option<String>,
     #[serde(default)]
     artists: Vec<RawYandexArtist>,
 }
@@ -181,6 +196,7 @@ pub async fn search_yandex_tracks(
             version: raw.version,
             artists,
             duration_ms: raw.duration_ms,
+            cover_uri: raw.cover_uri,
         });
     }
 
@@ -469,6 +485,7 @@ mod tests {
                 version: None,
                 artists: vec!["Кино".to_string()],
                 duration_ms: Some(399_000),
+                cover_uri: None,
             },
             // Duplicate of Кино — Кукушка from another compilation album
             YandexTrackInfo {
@@ -477,6 +494,7 @@ mod tests {
                 version: None,
                 artists: vec!["Кино".to_string()],
                 duration_ms: Some(399_000),
+                cover_uri: None,
             },
             YandexTrackInfo {
                 id: "200".to_string(),
@@ -484,6 +502,7 @@ mod tests {
                 version: None,
                 artists: vec!["Полина Гагарина".to_string()],
                 duration_ms: Some(232_000),
+                cover_uri: None,
             },
             YandexTrackInfo {
                 id: "300".to_string(),
@@ -491,6 +510,7 @@ mod tests {
                 version: None,
                 artists: vec!["Земфира".to_string()],
                 duration_ms: Some(310_000),
+                cover_uri: None,
             },
         ]
     }
@@ -525,6 +545,7 @@ mod tests {
             version: Some("Live".to_string()),
             artists: vec!["Кино".to_string()],
             duration_ms: Some(405_000),
+            cover_uri: None,
         });
 
         let results = filter_and_dedup_tracks("Кино Кукушка", tracks);

@@ -18,6 +18,11 @@ pub struct YouTubeVideoInfo {
 }
 
 impl YouTubeVideoInfo {
+    /// Returns the HTTPS URL for the video thumbnail.
+    pub fn thumbnail_url(&self) -> String {
+        format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", self.id)
+    }
+
     /// Formats a human-readable label for a Telegram inline keyboard button.
     pub fn button_label(&self) -> String {
         let uploader_str = self.uploader.as_deref().unwrap_or("YouTube");

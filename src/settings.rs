@@ -27,6 +27,28 @@ pub enum DefaultSearchProvider {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum InlineProviderPreference {
+    #[default]
+    UseDefaultSearch,
+    Yandex,
+    SoundCloud,
+    YouTube,
+    Mixed,
+}
+
+impl InlineProviderPreference {
+    pub fn label(&self) -> &'static str {
+        match self {
+            InlineProviderPreference::UseDefaultSearch => "Как в поиске (Авто) 🔄",
+            InlineProviderPreference::Yandex => "Яндекс Музыка 🎶",
+            InlineProviderPreference::SoundCloud => "SoundCloud ☁️",
+            InlineProviderPreference::YouTube => "YouTube 🎬",
+            InlineProviderPreference::Mixed => "Мульти-поиск 🔀",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SpeedPreference {
     #[default]
     Normal,     // 1.0x
@@ -65,7 +87,11 @@ impl SpeedPreference {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserSettings {
     #[serde(default)]
     pub quality: QualityPreference,
@@ -79,6 +105,28 @@ pub struct UserSettings {
     pub default_search: DefaultSearchProvider,
     #[serde(default)]
     pub default_speed: SpeedPreference,
+    #[serde(default)]
+    pub inline_provider: InlineProviderPreference,
+    #[serde(default = "default_true")]
+    pub inline_instant_cached: bool, // Instant cached delivery (Audio/Video file)
+    #[serde(default)]
+    pub inline_allow_nsfw: bool, // Allow 18+ content in inline mode
+}
+
+impl Default for UserSettings {
+    fn default() -> Self {
+        Self {
+            quality: QualityPreference::default(),
+            audio_only: false,
+            ym_quality: YandexQualityPreference::default(),
+            send_as_document: false,
+            default_search: DefaultSearchProvider::default(),
+            default_speed: SpeedPreference::default(),
+            inline_provider: InlineProviderPreference::default(),
+            inline_instant_cached: true,
+            inline_allow_nsfw: false,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -214,6 +262,42 @@ impl UserSettingsStore {
         updated
     }
 
+    pub fn toggle_inline_provider(&self, user_id: UserId) -> UserSettings {
+        let mut guard = self.inner.lock().unwrap();
+        let entry = guard.entry(user_id.0).or_default();
+        entry.inline_provider = match entry.inline_provider {
+            InlineProviderPreference::UseDefaultSearch => InlineProviderPreference::Yandex,
+            InlineProviderPreference::Yandex => InlineProviderPreference::SoundCloud,
+            InlineProviderPreference::SoundCloud => InlineProviderPreference::YouTube,
+            InlineProviderPreference::YouTube => InlineProviderPreference::Mixed,
+            InlineProviderPreference::Mixed => InlineProviderPreference::UseDefaultSearch,
+        };
+        let updated = *entry;
+        drop(guard);
+        self.save();
+        updated
+    }
+
+    pub fn toggle_inline_instant_cached(&self, user_id: UserId) -> UserSettings {
+        let mut guard = self.inner.lock().unwrap();
+        let entry = guard.entry(user_id.0).or_default();
+        entry.inline_instant_cached = !entry.inline_instant_cached;
+        let updated = *entry;
+        drop(guard);
+        self.save();
+        updated
+    }
+
+    pub fn toggle_inline_allow_nsfw(&self, user_id: UserId) -> UserSettings {
+        let mut guard = self.inner.lock().unwrap();
+        let entry = guard.entry(user_id.0).or_default();
+        entry.inline_allow_nsfw = !entry.inline_allow_nsfw;
+        let updated = *entry;
+        drop(guard);
+        self.save();
+        updated
+    }
+
     fn save(&self) {
         let guard = self.inner.lock().unwrap();
         match serde_json::to_string_pretty(&*guard) {
@@ -253,6 +337,9 @@ mod tests {
             send_as_document: false,
             default_search: DefaultSearchProvider::Yandex,
             default_speed: SpeedPreference::Normal,
+            inline_provider: InlineProviderPreference::UseDefaultSearch,
+            inline_instant_cached: true,
+            inline_allow_nsfw: false,
         });
 
         let updated = store.toggle_audio_only(uid);
@@ -278,6 +365,15 @@ mod tests {
         let updated_spd = store.toggle_speed(uid);
         assert_eq!(updated_spd.default_speed, SpeedPreference::Faster125);
 
+        let updated_inline_prov = store.toggle_inline_provider(uid);
+        assert_eq!(updated_inline_prov.inline_provider, InlineProviderPreference::Yandex);
+
+        let updated_instant = store.toggle_inline_instant_cached(uid);
+        assert!(!updated_instant.inline_instant_cached);
+
+        let updated_nsfw = store.toggle_inline_allow_nsfw(uid);
+        assert!(updated_nsfw.inline_allow_nsfw);
+
         // Reload store from same file
         let reloaded = UserSettingsStore::load_or_create(tmp.path());
         assert_eq!(reloaded.get(uid).quality, QualityPreference::AskEveryTime);
@@ -286,5 +382,8 @@ mod tests {
         assert_eq!(reloaded.get(uid).send_as_document, true);
         assert_eq!(reloaded.get(uid).default_search, DefaultSearchProvider::YouTube);
         assert_eq!(reloaded.get(uid).default_speed, SpeedPreference::Faster125);
+        assert_eq!(reloaded.get(uid).inline_provider, InlineProviderPreference::Yandex);
+        assert_eq!(reloaded.get(uid).inline_instant_cached, false);
+        assert_eq!(reloaded.get(uid).inline_allow_nsfw, true);
     }
 }
